@@ -144,13 +144,75 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         return str_starts_with($identifier, $folderIdentifier);
     }
 
+    protected function getClient(): S3Client
+    {
+        if ($this->client === null) {
+            throw new \RuntimeException(
+                'The storage is not configured: endpoint or credentials are missing.',
+                1789416429
+            );
+        }
+
+        return $this->client;
+    }
+
+    /**
+     * Turns a FAL identifier into an object key:
+     * "/images/logo.png" with base path "fileadmin"
+     *   becomes "fileadmin/images/logo.png".
+     */
+    protected function getObjectKey(string $identifier): string
+    {
+        $key = ltrim($identifier, '/');
+
+        return $this->basePath !== '' ? $this->basePath . '/' . $key : $key;
+    }
+
+    /**
+     * Inverse of getObjectKey().
+     */
+    protected function getIdentifierFromObjectKey(string $key): string
+    {
+        if ($this->basePath !== '' && str_starts_with($key, $this->basePath . '/')) {
+            $key = substr($key, strlen($this->basePath) + 1);
+        }
+
+        return '/' . ltrim($key, '/');
+    }
+
+    /**
+     * True if at least one object starts with the given prefix. This is how a
+     * store without directories answers the question "does this folder exist".
+     */
+    protected function prefixHasContent(string $prefix): bool
+    {
+        $result = $this->getClient()->listObjectsV2([
+            'Bucket' => $this->bucket,
+            'Prefix' => $prefix,
+            'MaxKeys' => 1,
+        ]);
+
+        return (int)($result['KeyCount'] ?? 0) > 0;
+    }
+
     // ---------------------------------------------------------------------
     // Implemented in later stages.
     // ---------------------------------------------------------------------
 
     public function getPublicUrl(string $identifier): ?string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        // A storage without a public base URL is private: FAL then falls back
+        // to delivering the file through TYPO3 itself.
+        if ($this->publicBaseUrl === '') {
+            return null;
+        }
+
+        // Encode each segment on its own: rawurlencode('/') would be %2F and
+        // destroy the path structure. The core's LocalDriver does the same.
+        $parts = explode('/', $this->getObjectKey($identifier));
+        $parts = array_map(rawurlencode(...), $parts);
+
+        return $this->publicBaseUrl . '/' . implode('/', $parts);
     }
 
     public function createFolder(string $newFolderName, string $parentFolderIdentifier = '', bool $recursive = false): string
@@ -170,17 +232,51 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function fileExists(string $fileIdentifier): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        // A trailing slash marks a folder, and a folder is never a file. This
+        // has to be checked on the raw value: canonicalisation strips it.
+        if ($fileIdentifier === '' || str_ends_with($fileIdentifier, '/')) {
+            return false;
+        }
+
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+
+        return $this->getClient()->doesObjectExistV2(
+            $this->bucket,
+            $this->getObjectKey($fileIdentifier)
+        );
     }
 
     public function folderExists(string $folderIdentifier): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+
+        // The root exists by definition, even in a completely empty bucket.
+        if ($folderIdentifier === '/') {
+            return true;
+        }
+
+        return $this->prefixHasContent($this->getObjectKey($folderIdentifier));
     }
 
     public function isFolderEmpty(string $folderIdentifier): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+        $prefix = $this->getObjectKey($folderIdentifier);
+
+        $result = $this->getClient()->listObjectsV2([
+            'Bucket' => $this->bucket,
+            'Prefix' => $prefix,
+            'MaxKeys' => 2,
+        ]);
+
+        foreach ($result['Contents'] ?? [] as $object) {
+            // The folder marker itself is not content.
+            if ($object['Key'] !== $prefix) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function addFile(string $localFilePath, string $targetFolderIdentifier, string $newFileName = '', bool $removeOriginal = true): string
@@ -235,7 +331,12 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function getFileContents(string $fileIdentifier): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $result = $this->getClient()->getObject([
+            'Bucket' => $this->bucket,
+            'Key' => $this->getObjectKey($this->canonicalizeAndCheckFileIdentifier($fileIdentifier)),
+        ]);
+
+        return (string)$result['Body'];
     }
 
     public function setFileContents(string $fileIdentifier, string $contents): int
@@ -245,12 +346,12 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function fileExistsInFolder(string $fileName, string $folderIdentifier): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        return $this->fileExists($this->getFileInFolder($fileName, $folderIdentifier));
     }
 
     public function folderExistsInFolder(string $folderName, string $folderIdentifier): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        return $this->folderExists($this->getFolderInFolder($folderName, $folderIdentifier));
     }
 
     public function getFileForLocalProcessing(string $fileIdentifier, bool $writable = true): string
@@ -275,7 +376,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function getFileInFolder(string $fileName, string $folderIdentifier): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        return $this->canonicalizeAndCheckFileIdentifier($folderIdentifier . '/' . $fileName);
     }
 
     public function getFilesInFolder(
@@ -292,7 +393,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function getFolderInFolder(string $folderName, string $folderIdentifier): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        return $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier . '/' . $folderName);
     }
 
     public function getFoldersInFolder(
