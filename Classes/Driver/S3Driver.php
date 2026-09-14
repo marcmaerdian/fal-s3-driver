@@ -301,7 +301,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                     $identifier,
                     (int)($object['Size'] ?? 0),
                     $lastModified instanceof \DateTimeInterface ? $lastModified->getTimestamp() : 0
-                );
+                ));
             }
 
             foreach ($page['CommonPrefixes'] ?? [] as $commonPrefix) {
@@ -878,7 +878,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     {
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
 
-        $information = $this->metaInfoCache[$fileIdentifier] ?? null;
+        $information = $this->fileInfo->get($fileIdentifier);
 
         if ($information === null) {
             try {
@@ -902,7 +902,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 (string)($head['ContentType'] ?? 'application/octet-stream')
             );
 
-            $this->fileInfo->set($fileIdentifier, $information;
+            $this->fileInfo->set($fileIdentifier, $information);
         }
 
         if ($propertiesToExtract === []) {
