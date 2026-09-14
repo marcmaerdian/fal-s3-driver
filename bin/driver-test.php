@@ -15,7 +15,8 @@ declare(strict_types=1);
 ***/
 
 use Aws\S3\S3Client;
-use Marcmaerdian\FalS3Driver\Driver\S3Driver;
+use MM\FalS3Driver\Driver\S3Driver;
+use MM\FalS3Driver\Service\S3ObjectRepository;
 use TYPO3\CMS\Core\Core\ApplicationContext;
 use TYPO3\CMS\Core\Core\Environment;
 
@@ -215,10 +216,10 @@ try {
     $counting->processConfiguration();
     $counting->initialize();
 
-    // Reach into the protected client instead of adding a test-only accessor
-    // to the driver's public API.
-    $clientProperty = new ReflectionProperty(S3Driver::class, 'client');
-    $countingClient = $clientProperty->getValue($counting);
+    // Reach into the protected repository instead of adding a test-only
+    // accessor to the driver's public API.
+    $repositoryProperty = new ReflectionProperty(S3Driver::class, 'objects');
+    $countingClient = $repositoryProperty->getValue($counting)->getClient();
 
     $requests = 0;
     $countingClient->getHandlerList()->appendSign(
@@ -278,8 +279,9 @@ try {
 
     // Lower the threshold instead of uploading 64 MB; S3 requires parts of at
     // least 5 MB, so the payload still has to exceed that.
-    $thresholdProperty = new ReflectionProperty(S3Driver::class, 'multipartThreshold');
-    $thresholdProperty->setValue($multipart, 5 * 1024 * 1024);
+    $repository = (new ReflectionProperty(S3Driver::class, 'objects'))->getValue($multipart);
+    (new ReflectionProperty(S3ObjectRepository::class, 'multipartThreshold'))
+        ->setValue($repository, 5 * 1024 * 1024);
 
     $bigFile = tempnam(sys_get_temp_dir(), 'fals3big') . '.bin';
     file_put_contents($bigFile, str_repeat('x', 6 * 1024 * 1024));

@@ -14,7 +14,7 @@ declare(strict_types=1);
 *
 ***/
 
-namespace Marcmaerdian\FalS3Driver\Configuration;
+namespace MM\FalS3Driver\Configuration;
 
 /**
  * The settings of one file storage, read from the FlexForm.

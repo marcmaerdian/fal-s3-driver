@@ -14,7 +14,7 @@ declare(strict_types=1);
 *
 ***/
 
-namespace Marcmaerdian\FalS3Driver\Service;
+namespace MM\FalS3Driver\Service;
 
 /**
  * Remembers file information for the duration of one request.

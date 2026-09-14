@@ -28,7 +28,7 @@
   },
   "autoload": {
     "psr-4": {
-      "Marcmaerdian\\FalS3Driver\\": "Classes/"
+      "MM\\FalS3Driver\\": "Classes/"
     }
   },
   "extra": {

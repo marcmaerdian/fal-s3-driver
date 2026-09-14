@@ -14,15 +14,13 @@ declare(strict_types=1);
 *
 ***/
 
-namespace Marcmaerdian\FalS3Driver\Driver;
+namespace MM\FalS3Driver\Driver;
 
-use Aws\Exception\AwsException;
-use Marcmaerdian\FalS3Driver\Configuration\StorageConfiguration;
-use Marcmaerdian\FalS3Driver\Service\FileInfoCache;
-use Marcmaerdian\FalS3Driver\Service\MimeTypeGuesser;
-use Marcmaerdian\FalS3Driver\Service\ObjectKeyMapper;
-use Aws\S3\MultipartUploader;
-use Aws\S3\S3Client;
+use MM\FalS3Driver\Configuration\StorageConfiguration;
+use MM\FalS3Driver\Service\FileInfoCache;
+use MM\FalS3Driver\Service\MimeTypeGuesser;
+use MM\FalS3Driver\Service\ObjectKeyMapper;
+use MM\FalS3Driver\Service\S3ObjectRepository;
 use Psr\Http\Message\StreamInterface;
 use TYPO3\CMS\Core\Resource\Capabilities;
 use TYPO3\CMS\Core\Resource\Driver\LocalDriver;
@@ -41,14 +39,8 @@ use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
  */
 class S3Driver extends AbstractHierarchicalFilesystemDriver
 {
-    /**
-     * Files above this size are uploaded in parts. A single PutObject is
-     * capped at 5 GB by the S3 API, and a long running upload of a large file
-     * is far more likely to survive when it can retry individual parts.
-     */
-    protected int $multipartThreshold = 64 * 1024 * 1024;
 
-    protected ?S3Client $client = null;
+    protected ?S3ObjectRepository $objects = null;
 
     /**
      * Read-only copies already downloaded during this request.
@@ -101,9 +93,6 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $this->fileInfo = new FileInfoCache();
     }
 
-    /**
-     * Called after processConfiguration().
-     */
     public function initialize(): void
     {
         // A storage may be only partially configured while an editor is still
@@ -113,27 +102,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             return;
         }
 
-        $options = [
-            'version' => 'latest',
-            // Providers without regions (R2, MinIO) still need a value here,
-            // because the SDK uses it when calculating the request signature.
-            'region' => $this->config->region,
-            'endpoint' => $this->config->endpoint,
-            'use_path_style_endpoint' => $this->config->usePathStyleEndpoint,
-            'credentials' => [
-                'key' => $this->config->accessKeyId,
-                'secret' => $this->config->secretAccessKey,
-            ],
-        ];
-
-        if ($this->config->compatibilityMode) {
-            // Most non-AWS providers do not implement the integrity checksums
-            // the SDK sends by default and answer with 501 Not Implemented.
-            $options['request_checksum_calculation'] = 'when_required';
-            $options['response_checksum_validation'] = 'when_required';
-        }
-
-        $this->client = new S3Client($options);
+        $this->objects = S3ObjectRepository::fromConfiguration($this->config);
     }
 
     public function mergeConfigurationCapabilities(Capabilities $capabilities): Capabilities
@@ -193,34 +162,20 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         return str_starts_with($identifier, $folderIdentifier);
     }
 
-    protected function getClient(): S3Client
+    protected function objects(): S3ObjectRepository
     {
-        if ($this->client === null) {
+        if ($this->objects === null) {
             throw new \RuntimeException(
                 'The storage is not configured: endpoint or credentials are missing.',
-                1789416429
+                1789414273
             );
         }
 
-        return $this->client;
+        return $this->objects;
     }
 
 
 
-    /**
-     * True if at least one object starts with the given prefix. This is how a
-     * store without directories answers the question "does this folder exist".
-     */
-    protected function prefixHasContent(string $prefix): bool
-    {
-        $result = $this->getClient()->listObjectsV2([
-            'Bucket' => $this->config->bucket,
-            'Prefix' => $prefix,
-            'MaxKeys' => 1,
-        ]);
-
-        return (int)($result['KeyCount'] ?? 0) > 0;
-    }
 
     /**
      * Builds the file information array for one object.
@@ -265,21 +220,13 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
         $prefix = $this->keys->toObjectKey($folderIdentifier);
 
-        $arguments = ['Bucket' => $this->config->bucket, 'Prefix' => $prefix];
-        if (!$recursive) {
-            // Without a delimiter the API returns every object below the
-            // prefix, no matter how deep. With it, anything deeper is folded
-            // into CommonPrefixes instead.
-            $arguments['Delimiter'] = '/';
-        }
-
         $files = [];
         $folders = [];
 
-        // The paginator hides the 1000 keys per response limit.
-        foreach ($this->getClient()->getPaginator('ListObjectsV2', $arguments) as $page) {
+        foreach ($this->objects()->listPages($prefix, !$recursive) as $page) {
             foreach ($page['Contents'] ?? [] as $object) {
                 $key = (string)$object['Key'];
+
                 // The zero byte object representing the folder itself is not
                 // one of its children.
                 if ($key === $prefix || str_ends_with($key, '/')) {
@@ -291,6 +238,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 if (!$recursive && substr_count($key, '/') !== substr_count($prefix, '/')) {
                     continue;
                 }
+
                 $identifier = $this->keys->toIdentifier($key);
                 $files[$identifier] = $identifier;
 
@@ -390,99 +338,10 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
 
 
-    /**
-     * Every object key below the given folder, as raw keys.
-     *
-     * @return array<int, string>
-     */
-    protected function getObjectKeysInFolder(string $folderIdentifier): array
-    {
-        $prefix = $this->keys->toObjectKey($this->canonicalizeAndCheckFolderIdentifier($folderIdentifier));
 
-        $keys = [];
-        foreach ($this->getClient()->getPaginator('ListObjectsV2', ['Bucket' => $this->config->bucket, 'Prefix' => $prefix]) as $page) {
-            foreach ($page['Contents'] ?? [] as $object) {
-                $keys[] = (string)$object['Key'];
-            }
-        }
 
-        return $keys;
-    }
 
-    /**
-     * @param array<int, string> $keys
-     */
-    protected function deleteObjectKeys(array $keys): void
-    {
-        if ($keys === []) {
-            return;
-        }
 
-        foreach ($keys as $key) {
-            $this->fileInfo->flush($this->keys->toIdentifier($key));
-        }
-
-        // DeleteObjects accepts at most 1000 keys per call.
-        foreach (array_chunk($keys, 1000) as $chunk) {
-            $this->getClient()->deleteObjects([
-                'Bucket' => $this->config->bucket,
-                'Delete' => ['Objects' => array_map(static fn(string $key): array => ['Key' => $key], $chunk)],
-            ]);
-        }
-    }
-
-    /**
-     * Cache-Control for uploaded objects. Without it the CDN in front of the
-     * bucket decides on its own how long it keeps a file.
-     *
-     * @return array<string, string>
-     */
-    protected function getUploadOptions(): array
-    {
-        return $this->config->cacheControlMaxAge > 0
-            ? ['CacheControl' => 'max-age=' . $this->config->cacheControlMaxAge]
-            : [];
-    }
-
-    /**
-     * Uploads a local file, switching to a multipart upload for large ones.
-     */
-    protected function uploadFile(string $localFilePath, string $key, string $mimeType): void
-    {
-        $parameters = ['ContentType' => $mimeType] + $this->getUploadOptions();
-        $size = (int)filesize($localFilePath);
-
-        if ($size > $this->multipartThreshold) {
-            $uploader = new MultipartUploader($this->getClient(), $localFilePath, [
-                'bucket' => $this->config->bucket,
-                'key' => $key,
-                'params' => $parameters,
-            ]);
-            $uploader->upload();
-        } else {
-            // A multipart upload cannot handle zero byte files at all, and for
-            // small ones the extra round trips are not worth it.
-            $this->getClient()->putObject([
-                'Bucket' => $this->config->bucket,
-                'Key' => $key,
-                'SourceFile' => $localFilePath,
-            ] + $parameters);
-        }
-
-        $this->fileInfo->flush($this->keys->toIdentifier($key));
-    }
-
-    protected function putObject(string $key, string $body, string $mimeType): void
-    {
-        $this->getClient()->putObject([
-            'Bucket' => $this->config->bucket,
-            'Key' => $key,
-            'Body' => $body,
-            'ContentType' => $mimeType,
-        ] + $this->getUploadOptions());
-
-        $this->fileInfo->flush($this->keys->toIdentifier($key));
-    }
 
     /**
      * Copies everything below a folder to a new prefix and reports the mapping
@@ -499,15 +358,10 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $targetPrefix = $this->keys->toObjectKey($targetFolderIdentifier);
 
         $mapping = [];
-        foreach ($this->getObjectKeysInFolder($sourceFolderIdentifier) as $key) {
+        foreach ($this->objects()->listKeys($sourceFolderIdentifier === '/' ? '' : $sourcePrefix) as $key) {
             $targetKey = $targetPrefix . substr($key, strlen($sourcePrefix));
 
-            $this->getClient()->copyObject([
-                'Bucket' => $this->config->bucket,
-                'Key' => $targetKey,
-                'CopySource' => $this->keys->toCopySource($key),
-            ] + $this->getUploadOptions());
-
+            $this->objects()->copy($this->keys->toCopySource($key), $targetKey);
             $this->fileInfo->flush($this->keys->toIdentifier($targetKey));
 
             // Folder markers are copied but not reported: the mapping tells FAL
@@ -518,6 +372,21 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         }
 
         return $mapping;
+    }
+
+    /**
+     * Removes every object below a folder and forgets what was cached for it.
+     */
+    protected function deleteFolderContents(string $folderIdentifier): void
+    {
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+        $keys = $this->objects()->listKeys($this->keys->toObjectKey($folderIdentifier));
+
+        foreach ($keys as $key) {
+            $this->fileInfo->flush($this->keys->toIdentifier($key));
+        }
+
+        $this->objects()->deleteMany($keys);
     }
 
     public function getPublicUrl(string $identifier): ?string
@@ -548,7 +417,8 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
         // An object store has no directories, so an empty folder only exists
         // as a zero byte object whose key ends with a slash.
-        $this->putObject($this->keys->toObjectKey($folderIdentifier), '', 'application/x-directory');
+        $this->objects()->put($this->keys->toObjectKey($folderIdentifier), '', 'application/x-directory');
+        $this->fileInfo->flush($folderIdentifier);
 
         return $folderIdentifier;
     }
@@ -567,13 +437,10 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
 
         if (!$deleteRecursively && !$this->isFolderEmpty($folderIdentifier)) {
-            throw new \RuntimeException(
-                'Folder "' . $folderIdentifier . '" is not empty.',
-                1789344006
-            );
+            throw new \RuntimeException('Folder "' . $folderIdentifier . '" is not empty.', 1789344006);
         }
 
-        $this->deleteObjectKeys($this->getObjectKeysInFolder($folderIdentifier));
+        $this->deleteFolderContents($folderIdentifier);
 
         return true;
     }
@@ -586,11 +453,8 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             return false;
         }
 
-        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
-
-        return $this->getClient()->doesObjectExistV2(
-            $this->config->bucket,
-            $this->keys->toObjectKey($fileIdentifier)
+        return $this->objects()->exists(
+            $this->keys->toObjectKey($this->canonicalizeAndCheckFileIdentifier($fileIdentifier))
         );
     }
 
@@ -603,21 +467,14 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             return true;
         }
 
-        return $this->prefixHasContent($this->keys->toObjectKey($folderIdentifier));
+        return $this->objects()->hasAnyObject($this->keys->toObjectKey($folderIdentifier));
     }
 
     public function isFolderEmpty(string $folderIdentifier): bool
     {
-        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
-        $prefix = $this->keys->toObjectKey($folderIdentifier);
+        $prefix = $this->keys->toObjectKey($this->canonicalizeAndCheckFolderIdentifier($folderIdentifier));
 
-        $result = $this->getClient()->listObjectsV2([
-            'Bucket' => $this->config->bucket,
-            'Prefix' => $prefix,
-            'MaxKeys' => 2,
-        ]);
-
-        foreach ($result['Contents'] ?? [] as $object) {
+        foreach ($this->objects()->listFirstObjects($prefix, 2) as $object) {
             // The folder marker itself is not content.
             if ($object['Key'] !== $prefix) {
                 return false;
@@ -636,11 +493,12 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $newFileName = $this->sanitizeFileName($newFileName !== '' ? $newFileName : basename($localFilePath));
         $fileIdentifier = $this->getFileInFolder($newFileName, $targetFolderIdentifier);
 
-        $this->uploadFile(
+        $this->objects()->upload(
             $localFilePath,
             $this->keys->toObjectKey($fileIdentifier),
             $this->mimeTypes->guess($newFileName, $localFilePath)
         );
+        $this->fileInfo->flush($fileIdentifier);
 
         if ($removeOriginal) {
             unlink($localFilePath);
@@ -654,7 +512,12 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $fileName = $this->sanitizeFileName($fileName);
         $fileIdentifier = $this->getFileInFolder($fileName, $parentFolderIdentifier);
 
-        $this->putObject($this->keys->toObjectKey($fileIdentifier), '', $this->mimeTypes->guess($fileName));
+        $this->objects()->put(
+            $this->keys->toObjectKey($fileIdentifier),
+            '',
+            $this->mimeTypes->guess($fileName)
+        );
+        $this->fileInfo->flush($fileIdentifier);
 
         return $fileIdentifier;
     }
@@ -664,14 +527,11 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
         $targetIdentifier = $this->getFileInFolder($this->sanitizeFileName($fileName), $targetFolderIdentifier);
 
-        $this->getClient()->copyObject([
-            'Bucket' => $this->config->bucket,
-            'Key' => $this->keys->toObjectKey($targetIdentifier),
-            'CopySource' => $this->keys->toCopySource($this->keys->toObjectKey($fileIdentifier)),
-            'MetadataDirective' => 'REPLACE',
-            'ContentType' => $this->mimeTypes->guess($targetIdentifier),
-        ] + $this->getUploadOptions());
-
+        $this->objects()->copy(
+            $this->keys->toCopySource($this->keys->toObjectKey($fileIdentifier)),
+            $this->keys->toObjectKey($targetIdentifier),
+            $this->mimeTypes->guess($targetIdentifier)
+        );
         $this->fileInfo->flush($targetIdentifier);
 
         return $targetIdentifier;
@@ -693,11 +553,12 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
 
-        $this->uploadFile(
+        $this->objects()->upload(
             $localFilePath,
             $this->keys->toObjectKey($fileIdentifier),
             $this->mimeTypes->guess($fileIdentifier, $localFilePath)
         );
+        $this->fileInfo->flush($fileIdentifier);
 
         return true;
     }
@@ -706,11 +567,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     {
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
 
-        $this->getClient()->deleteObject([
-            'Bucket' => $this->config->bucket,
-            'Key' => $this->keys->toObjectKey($fileIdentifier),
-        ]);
-
+        $this->objects()->delete($this->keys->toObjectKey($fileIdentifier));
         $this->fileInfo->flush($fileIdentifier);
 
         return true;
@@ -727,10 +584,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             return $this->hashIdentifier($fileIdentifier);
         }
 
-        $body = $this->getClient()->getObject([
-            'Bucket' => $this->config->bucket,
-            'Key' => $this->keys->toObjectKey($fileIdentifier),
-        ])['Body'];
+        $body = $this->objects()->getBody($this->keys->toObjectKey($fileIdentifier));
 
         if (!$body instanceof StreamInterface) {
             return hash($hashAlgorithm, (string)$body);
@@ -760,7 +614,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $destination = $this->getFolderInFolder($this->sanitizeFileName($newFolderName), $targetFolderIdentifier);
 
         $mapping = $this->copyFolderContents($sourceFolderIdentifier, $destination);
-        $this->deleteObjectKeys($this->getObjectKeysInFolder($sourceFolderIdentifier));
+        $this->deleteFolderContents($sourceFolderIdentifier);
 
         return $mapping;
     }
@@ -775,23 +629,21 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function getFileContents(string $fileIdentifier): string
     {
-        $result = $this->getClient()->getObject([
-            'Bucket' => $this->config->bucket,
-            'Key' => $this->keys->toObjectKey($this->canonicalizeAndCheckFileIdentifier($fileIdentifier)),
-        ]);
-
-        return (string)$result['Body'];
+        return $this->objects()->getContents(
+            $this->keys->toObjectKey($this->canonicalizeAndCheckFileIdentifier($fileIdentifier))
+        );
     }
 
     public function setFileContents(string $fileIdentifier, string $contents): int
     {
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
 
-        $this->putObject(
+        $this->objects()->put(
             $this->keys->toObjectKey($fileIdentifier),
             $contents,
             $this->mimeTypes->guess($fileIdentifier)
         );
+        $this->fileInfo->flush($fileIdentifier);
 
         return strlen($contents);
     }
@@ -819,24 +671,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $extension = pathinfo($fileIdentifier, PATHINFO_EXTENSION);
         $temporaryPath = GeneralUtility::tempnam('fal-s3-', $extension !== '' ? '.' . $extension : '');
 
-        try {
-            $this->getClient()->getObject([
-                'Bucket' => $this->config->bucket,
-                'Key' => $this->keys->toObjectKey($fileIdentifier),
-                'SaveAs' => $temporaryPath,
-            ]);
-        } catch (AwsException $exception) {
-            @unlink($temporaryPath);
-
-            throw new FileDoesNotExistException(
-                'File ' . $fileIdentifier . ' could not be downloaded for processing.',
-                1789344009,
-                $exception
-            );
-        }
-
-        // A failed SaveAs can leave the error body behind instead of the file.
-        if (!is_file($temporaryPath)) {
+        if (!$this->objects()->download($this->keys->toObjectKey($fileIdentifier), $temporaryPath)) {
             throw new FileDoesNotExistException(
                 'File ' . $fileIdentifier . ' could not be copied to a temporary path.',
                 1789344010
@@ -854,12 +689,9 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function dumpFileContents(string $identifier): void
     {
-        $result = $this->getClient()->getObject([
-            'Bucket' => $this->config->bucket,
-            'Key' => $this->keys->toObjectKey($this->canonicalizeAndCheckFileIdentifier($identifier)),
-        ]);
-
-        $body = $result['Body'] ?? null;
+        $body = $this->objects()->getBody(
+            $this->keys->toObjectKey($this->canonicalizeAndCheckFileIdentifier($identifier))
+        );
 
         // Stream in chunks rather than materialising the whole object: a video
         // would otherwise have to fit into PHP's memory limit.
@@ -877,20 +709,15 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     public function getFileInfoByIdentifier(string $fileIdentifier, array $propertiesToExtract = []): array
     {
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
-
         $information = $this->fileInfo->get($fileIdentifier);
 
         if ($information === null) {
-            try {
-                $head = $this->getClient()->headObject([
-                    'Bucket' => $this->config->bucket,
-                    'Key' => $this->keys->toObjectKey($fileIdentifier),
-                ]);
-            } catch (AwsException $exception) {
+            $head = $this->objects()->head($this->keys->toObjectKey($fileIdentifier));
+
+            if ($head === null) {
                 throw new FileDoesNotExistException(
                     'File ' . $fileIdentifier . ' does not exist.',
-                    1789344003,
-                    $exception
+                    1789344003
                 );
             }
 
