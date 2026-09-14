@@ -18,6 +18,7 @@ namespace Marcmaerdian\FalS3Driver\Driver;
 
 use Aws\Exception\AwsException;
 use Marcmaerdian\FalS3Driver\Configuration\StorageConfiguration;
+use Marcmaerdian\FalS3Driver\Service\FileInfoCache;
 use Marcmaerdian\FalS3Driver\Service\MimeTypeGuesser;
 use Marcmaerdian\FalS3Driver\Service\ObjectKeyMapper;
 use Aws\S3\MultipartUploader;
@@ -63,18 +64,11 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
      */
     protected array $temporaryPaths = [];
 
-    /**
-     * File information already known in this request, keyed by identifier.
-     * ListObjectsV2 reports size and timestamp for every object it returns, so
-     * a listing can fill this instead of triggering one HeadObject per file.
-     *
-     * @var array<string, array<string, mixed>>
-     */
-    protected array $metaInfoCache = [];
 
     protected StorageConfiguration $config;
     protected ObjectKeyMapper $keys;
     protected MimeTypeGuesser $mimeTypes;
+    protected FileInfoCache $fileInfo;
 
     public function __construct(array $configuration = [])
     {
@@ -104,6 +98,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $this->config = StorageConfiguration::fromArray($this->configuration);
         $this->keys = new ObjectKeyMapper($this->config->bucket, $this->config->basePath);
         $this->mimeTypes = new MimeTypeGuesser();
+        $this->fileInfo = new FileInfoCache();
     }
 
     /**
@@ -257,26 +252,6 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         ];
     }
 
-    /**
-     * Drops cached information after a write, for the object itself and for
-     * anything below it if it is a folder.
-     */
-    protected function flushMetaInfoCache(string $identifier = ''): void
-    {
-        if ($identifier === '') {
-            $this->metaInfoCache = [];
-
-            return;
-        }
-
-        unset($this->metaInfoCache[$identifier]);
-
-        foreach (array_keys($this->metaInfoCache) as $cached) {
-            if (str_starts_with($cached, rtrim($identifier, '/') . '/')) {
-                unset($this->metaInfoCache[$cached]);
-            }
-        }
-    }
 
     /**
      * Lists one folder level. A flat object store has no directories, so the
@@ -322,7 +297,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 // The listing already carries size and timestamp, so remember
                 // them instead of asking for each file separately later on.
                 $lastModified = $object['LastModified'] ?? null;
-                $this->metaInfoCache[$identifier] = $this->buildFileInfo(
+                $this->fileInfo->set($identifier, $this->buildFileInfo(
                     $identifier,
                     (int)($object['Size'] ?? 0),
                     $lastModified instanceof \DateTimeInterface ? $lastModified->getTimestamp() : 0
@@ -444,7 +419,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         }
 
         foreach ($keys as $key) {
-            $this->flushMetaInfoCache($this->keys->toIdentifier($key));
+            $this->fileInfo->flush($this->keys->toIdentifier($key));
         }
 
         // DeleteObjects accepts at most 1000 keys per call.
@@ -494,7 +469,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             ] + $parameters);
         }
 
-        $this->flushMetaInfoCache($this->keys->toIdentifier($key));
+        $this->fileInfo->flush($this->keys->toIdentifier($key));
     }
 
     protected function putObject(string $key, string $body, string $mimeType): void
@@ -506,7 +481,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'ContentType' => $mimeType,
         ] + $this->getUploadOptions());
 
-        $this->flushMetaInfoCache($this->keys->toIdentifier($key));
+        $this->fileInfo->flush($this->keys->toIdentifier($key));
     }
 
     /**
@@ -533,7 +508,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 'CopySource' => $this->keys->toCopySource($key),
             ] + $this->getUploadOptions());
 
-            $this->flushMetaInfoCache($this->keys->toIdentifier($targetKey));
+            $this->fileInfo->flush($this->keys->toIdentifier($targetKey));
 
             // Folder markers are copied but not reported: the mapping tells FAL
             // which file records to rewrite, and a marker has no record.
@@ -697,7 +672,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'ContentType' => $this->mimeTypes->guess($targetIdentifier),
         ] + $this->getUploadOptions());
 
-        $this->flushMetaInfoCache($targetIdentifier);
+        $this->fileInfo->flush($targetIdentifier);
 
         return $targetIdentifier;
     }
@@ -736,7 +711,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'Key' => $this->keys->toObjectKey($fileIdentifier),
         ]);
 
-        $this->flushMetaInfoCache($fileIdentifier);
+        $this->fileInfo->flush($fileIdentifier);
 
         return true;
     }
@@ -927,7 +902,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 (string)($head['ContentType'] ?? 'application/octet-stream')
             );
 
-            $this->metaInfoCache[$fileIdentifier] = $information;
+            $this->fileInfo->set($fileIdentifier, $information;
         }
 
         if ($propertiesToExtract === []) {
