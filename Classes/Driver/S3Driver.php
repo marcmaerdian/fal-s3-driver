@@ -46,6 +46,11 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
      */
     public const DRIVER_TYPE = 'S3';
 
+    /**
+     * Used to look up global overrides in TYPO3_CONF_VARS.
+     */
+    public const EXTENSION_KEY = 'fal_s3_driver';
+
 
     protected ?ObjectRepository $objects = null;
 
@@ -94,7 +99,9 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function processConfiguration(): void
     {
-        $this->config = StorageConfiguration::fromArray($this->configuration);
+        $this->config = StorageConfiguration::fromArray(
+            $this->applyGlobalOverrides($this->configuration)
+        );
         $this->keys = new ObjectKeyMapper($this->config->basePath);
         $this->mimeTypes = new MimeTypeGuesser();
         $this->fileInfo = new FileInfoCache();
@@ -110,6 +117,41 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         }
 
         $this->objects = $this->createObjectRepository();
+    }
+
+    /**
+     * Lets a deployment override storage settings from outside the database.
+     *
+     *   $GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS']['fal_s3_driver']['storage']
+     *   $GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS']['fal_s3_driver']['storage_3']
+     *
+     * The first applies to every storage of this type, the second only to the
+     * one with that uid and wins over the generic block.
+     *
+     * This matters for two reasons. Credentials no longer have to sit in
+     * sys_file_storage as plain text, and one and the same storage record can
+     * be deployed to several environments while endpoint and bucket differ per
+     * environment - which is exactly what a build-once-promote pipeline needs.
+     *
+     * @param array<string, mixed> $configuration
+     * @return array<string, mixed>
+     */
+    protected function applyGlobalOverrides(array $configuration): array
+    {
+        $overrides = $GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS'][self::EXTENSION_KEY] ?? [];
+
+        if (!is_array($overrides)) {
+            return $configuration;
+        }
+
+        $generic = $overrides['storage'] ?? [];
+        $specific = $this->storageUid !== null ? ($overrides['storage_' . $this->storageUid] ?? []) : [];
+
+        return array_replace(
+            $configuration,
+            is_array($generic) ? $generic : [],
+            is_array($specific) ? $specific : []
+        );
     }
 
     /**

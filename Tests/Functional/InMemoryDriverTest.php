@@ -41,6 +41,13 @@ final class InMemoryDriverTest extends AbstractDriverBehaviourTest
      */
     private array $configuration = [];
 
+    protected function tearDown(): void
+    {
+        unset($GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS'][S3Driver::EXTENSION_KEY]);
+
+        parent::tearDown();
+    }
+
     protected function createDriver(): S3Driver
     {
         return $this->buildDriver();
@@ -49,7 +56,7 @@ final class InMemoryDriverTest extends AbstractDriverBehaviourTest
     /**
      * @param array<string, mixed> $overrides
      */
-    private function buildDriver(array $overrides = []): S3Driver
+    private function buildDriver(array $overrides = [], ?int $storageUid = null): S3Driver
     {
         $this->configuration = $overrides + [
             'endpoint' => 'https://example.invalid',
@@ -67,6 +74,13 @@ final class InMemoryDriverTest extends AbstractDriverBehaviourTest
         );
 
         $driver = new InMemoryS3Driver($this->configuration, $this->repository);
+
+        if ($storageUid !== null) {
+            // ResourceStorage does the same, and before processConfiguration():
+            // the uid decides which override block applies.
+            $driver->setStorageUid($storageUid);
+        }
+
         $driver->processConfiguration();
         $driver->initialize();
 
@@ -133,6 +147,63 @@ final class InMemoryDriverTest extends AbstractDriverBehaviourTest
         $this->driver->setFileContents($this->driver->createFile('plain.txt', $this->root . '/'), 'body');
 
         self::assertSame('', $this->headRawObject('/plain.txt')['CacheControl']);
+    }
+
+    // =======================================================================
+    // Overrides from TYPO3_CONF_VARS
+    // =======================================================================
+
+    /**
+     * Credentials must not have to live in sys_file_storage as plain text, and
+     * one storage record has to survive a deployment to several environments.
+     */
+    public function testGlobalOverrideBeatsTheStoredConfiguration(): void
+    {
+        $GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS'][S3Driver::EXTENSION_KEY]['storage'] = [
+            'publicBaseUrl' => 'https://from-settings.example.com',
+        ];
+
+        $driver = $this->buildDriver(['publicBaseUrl' => 'https://from-database.example.com']);
+
+        self::assertSame(
+            'https://from-settings.example.com/fileadmin/a.png',
+            $driver->getPublicUrl('/a.png')
+        );
+    }
+
+    public function testStorageSpecificOverrideBeatsTheGenericOne(): void
+    {
+        $GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS'][S3Driver::EXTENSION_KEY] = [
+            'storage' => ['publicBaseUrl' => 'https://generic.example.com'],
+            'storage_42' => ['publicBaseUrl' => 'https://storage-42.example.com'],
+        ];
+
+        $driver = $this->buildDriver([], 42);
+
+        self::assertSame('https://storage-42.example.com/fileadmin/a.png', $driver->getPublicUrl('/a.png'));
+    }
+
+    public function testGenericOverrideAppliesToOtherStorages(): void
+    {
+        $GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS'][S3Driver::EXTENSION_KEY] = [
+            'storage' => ['publicBaseUrl' => 'https://generic.example.com'],
+            'storage_42' => ['publicBaseUrl' => 'https://storage-42.example.com'],
+        ];
+
+        $driver = $this->buildDriver([], 7);
+
+        self::assertSame('https://generic.example.com/fileadmin/a.png', $driver->getPublicUrl('/a.png'));
+    }
+
+    public function testUnrelatedFieldsSurviveAnOverride(): void
+    {
+        $GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS'][S3Driver::EXTENSION_KEY]['storage'] = [
+            'bucket' => 'overridden-bucket',
+        ];
+
+        $driver = $this->buildDriver(['publicBaseUrl' => 'https://cdn.example.com']);
+
+        self::assertSame('https://cdn.example.com/fileadmin/a.png', $driver->getPublicUrl('/a.png'));
     }
 
     // =======================================================================

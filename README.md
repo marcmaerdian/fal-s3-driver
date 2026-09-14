@@ -47,6 +47,30 @@ Create a file storage in the TYPO3 backend and pick the driver
 | Use path-style endpoint | Required by R2 and MinIO; off for AWS S3 |
 | Non-AWS compatibility mode | Disables integrity checksums that only AWS implements |
 
+### Keeping credentials out of the database
+
+Everything configured in the backend can be overridden from
+`config/system/settings.php`, which keeps secrets out of `sys_file_storage` and
+lets one storage record be deployed to several environments:
+
+```php
+$GLOBALS['TYPO3_CONF_VARS']['EXTENSIONS']['fal_s3_driver'] = [
+    // applies to every storage using this driver
+    'storage' => [
+        'accessKeyId' => getenv('S3_ACCESS_KEY_ID'),
+        'secretAccessKey' => getenv('S3_SECRET_ACCESS_KEY'),
+    ],
+    // applies only to sys_file_storage.uid = 3 and wins over the block above
+    'storage_3' => [
+        'endpoint' => getenv('S3_ENDPOINT'),
+        'bucket' => getenv('S3_BUCKET'),
+        'publicBaseUrl' => getenv('S3_PUBLIC_BASE_URL'),
+    ],
+];
+```
+
+Fields that are not listed keep the value stored in the backend.
+
 ### Endpoint examples
 
 | Provider | Endpoint |

@@ -20,5 +20,6 @@ $GLOBALS['TYPO3_CONF_VARS']['SYS']['fal']['registeredDrivers'][\MARCMAERDIAN\Fal
     'class' => \MARCMAERDIAN\FalS3Driver\Driver\S3Driver::class,
     'shortName' => \MARCMAERDIAN\FalS3Driver\Driver\S3Driver::DRIVER_TYPE,
     'label' => 'S3-compatible storage (R2, Hetzner, MinIO, AWS, R2 Cloudflare)',
-    'flexFormDS' => 'FILE:EXT:fal_s3_driver/Configuration/FlexForm/S3DriverFlexForm.xml',
+    'flexFormDS' => 'FILE:EXT:' . \MARCMAERDIAN\FalS3Driver\Driver\S3Driver::EXTENSION_KEY
+        . '/Configuration/FlexForm/S3DriverFlexForm.xml',
 ];
