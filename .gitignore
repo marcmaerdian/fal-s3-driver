@@ -5,3 +5,4 @@
 /.phpunit.result.cache
 /public/
 /.env.local
+/var/

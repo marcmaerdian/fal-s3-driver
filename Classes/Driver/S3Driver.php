@@ -18,12 +18,14 @@ namespace Marcmaerdian\FalS3Driver\Driver;
 
 use Aws\Exception\AwsException;
 use Aws\S3\S3Client;
+use Psr\Http\Message\StreamInterface;
 use TYPO3\CMS\Core\Resource\Capabilities;
 use TYPO3\CMS\Core\Resource\Driver\LocalDriver;
 use TYPO3\CMS\Core\Resource\Exception\FileDoesNotExistException;
 use TYPO3\CMS\Core\Resource\Exception\FolderDoesNotExistException;
 use TYPO3\CMS\Core\Resource\Exception\InvalidFileNameException;
 use TYPO3\CMS\Core\Resource\MimeTypeDetector;
+use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
 
 /**
@@ -35,6 +37,13 @@ use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
 class S3Driver extends AbstractHierarchicalFilesystemDriver
 {
     protected ?S3Client $client = null;
+
+    /**
+     * Read-only copies already downloaded during this request.
+     *
+     * @var array<string, string>
+     */
+    protected array $localCopies = [];
 
     protected string $endpoint = '';
     protected string $region = '';
@@ -450,10 +459,6 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         return $mapping;
     }
 
-    // ---------------------------------------------------------------------
-    // Implemented in later stages.
-    // ---------------------------------------------------------------------
-
     public function getPublicUrl(string $identifier): ?string
     {
         // A storage without a public base URL is private: FAL then falls back
@@ -711,12 +716,60 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function getFileForLocalProcessing(string $fileIdentifier, bool $writable = true): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+
+        // Read-only copies may be reused within the request. A writable copy
+        // must always be fresh, because the caller is allowed to modify it.
+        if (!$writable && isset($this->localCopies[$fileIdentifier]) && is_readable($this->localCopies[$fileIdentifier])) {
+            return $this->localCopies[$fileIdentifier];
+        }
+
+        $extension = pathinfo($fileIdentifier, PATHINFO_EXTENSION);
+        $temporaryPath = GeneralUtility::tempnam('fal-s3-', $extension !== '' ? '.' . $extension : '');
+
+        try {
+            $this->getClient()->getObject([
+                'Bucket' => $this->bucket,
+                'Key' => $this->getObjectKey($fileIdentifier),
+                'SaveAs' => $temporaryPath,
+            ]);
+        } catch (AwsException $exception) {
+            @unlink($temporaryPath);
+
+            throw new FileDoesNotExistException(
+                'File ' . $fileIdentifier . ' could not be downloaded for processing.',
+                1789344009,
+                $exception
+            );
+        }
+
+        if (!$writable) {
+            $this->localCopies[$fileIdentifier] = $temporaryPath;
+        }
+
+        return $temporaryPath;
     }
 
     public function dumpFileContents(string $identifier): void
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $result = $this->getClient()->getObject([
+            'Bucket' => $this->bucket,
+            'Key' => $this->getObjectKey($this->canonicalizeAndCheckFileIdentifier($identifier)),
+        ]);
+
+        $body = $result['Body'] ?? null;
+
+        // Stream in chunks rather than materialising the whole object: a video
+        // would otherwise have to fit into PHP's memory limit.
+        if ($body instanceof StreamInterface) {
+            while (!$body->eof()) {
+                echo $body->read(8192);
+            }
+
+            return;
+        }
+
+        echo (string)$body;
     }
 
     public function getFileInfoByIdentifier(string $fileIdentifier, array $propertiesToExtract = []): array
@@ -845,13 +898,5 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     public function countFoldersInFolder(string $folderIdentifier, bool $recursive = false, array $folderNameFilterCallbacks = []): int
     {
         return count($this->getFoldersInFolder($folderIdentifier, 0, 0, $recursive, $folderNameFilterCallbacks));
-    }
-
-    private function notImplemented(string $method): \RuntimeException
-    {
-        return new \RuntimeException(
-            sprintf('S3Driver::%s() is not implemented yet.', $method),
-            1789414273
-        );
     }
 }

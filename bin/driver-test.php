@@ -16,8 +16,25 @@ declare(strict_types=1);
 
 use Aws\S3\S3Client;
 use Marcmaerdian\FalS3Driver\Driver\S3Driver;
+use TYPO3\CMS\Core\Core\ApplicationContext;
+use TYPO3\CMS\Core\Core\Environment;
 
 require __DIR__ . '/../vendor/autoload.php';
+
+// GeneralUtility::tempnam() resolves its target through Environment, which is
+// normally set up while TYPO3 boots. Outside of TYPO3 we do it ourselves.
+$projectPath = dirname(__DIR__);
+Environment::initialize(
+    new ApplicationContext('Development'),
+    true,
+    true,
+    $projectPath,
+    $projectPath . '/public',
+    $projectPath . '/var',
+    $projectPath . '/config',
+    __FILE__,
+    'UNIX'
+);
 
 $config = require __DIR__ . '/environment.php';
 
@@ -153,6 +170,24 @@ try {
     $assertions['deleteFile worked'] = [$driver->fileExists($root . '/moved/note.txt'), false];
     $assertions['deleteFolder recursive'] = [$driver->deleteFolder($root . '/moved/', true), true];
     $assertions['deleteFolder worked'] = [$driver->folderExists($root . '/moved/'), false];
+
+    // --- local processing and streaming ------------------------------------
+    $localCopy = $driver->getFileForLocalProcessing($root . '/readme.txt', false);
+    $assertions['getFileForLocalProcessing'] = [is_readable($localCopy), true];
+    $assertions['local copy has content'] = [file_get_contents($localCopy), 'hello from the driver test'];
+    $assertions['local copy keeps extension'] = [pathinfo($localCopy, PATHINFO_EXTENSION), 'txt'];
+    $assertions['read-only copy is reused'] = [
+        $driver->getFileForLocalProcessing($root . '/readme.txt', false),
+        $localCopy,
+    ];
+    $assertions['writable copy is fresh'] = [
+        $driver->getFileForLocalProcessing($root . '/readme.txt', true) !== $localCopy,
+        true,
+    ];
+
+    ob_start();
+    $driver->dumpFileContents($root . '/readme.txt');
+    $assertions['dumpFileContents'] = [ob_get_clean(), 'hello from the driver test'];
 
     $failed = 0;
     foreach ($assertions as $label => [$actual, $expected]) {
