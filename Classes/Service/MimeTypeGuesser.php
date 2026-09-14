@@ -14,7 +14,7 @@ declare(strict_types=1);
 *
 ***/
 
-namespace MM\FalS3Driver\Service;
+namespace MARCMAERDIAN\FalS3Driver\Service;
 
 use TYPO3\CMS\Core\Resource\MimeTypeDetector;
 

@@ -14,13 +14,14 @@ declare(strict_types=1);
 *
 ***/
 
-namespace MM\FalS3Driver\Driver;
+namespace MARCMAERDIAN\FalS3Driver\Driver;
 
-use MM\FalS3Driver\Configuration\StorageConfiguration;
-use MM\FalS3Driver\Service\FileInfoCache;
-use MM\FalS3Driver\Service\MimeTypeGuesser;
-use MM\FalS3Driver\Service\ObjectKeyMapper;
-use MM\FalS3Driver\Service\S3ObjectRepository;
+use MARCMAERDIAN\FalS3Driver\Configuration\StorageConfiguration;
+use MARCMAERDIAN\FalS3Driver\Service\FileInfoCache;
+use MARCMAERDIAN\FalS3Driver\Service\MimeTypeGuesser;
+use MARCMAERDIAN\FalS3Driver\Service\ObjectKeyMapper;
+use MARCMAERDIAN\FalS3Driver\Service\ObjectRepository;
+use MARCMAERDIAN\FalS3Driver\Service\S3ObjectRepository;
 use Psr\Http\Message\StreamInterface;
 use TYPO3\CMS\Core\Resource\Capabilities;
 use TYPO3\CMS\Core\Resource\Driver\LocalDriver;
@@ -39,8 +40,14 @@ use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
  */
 class S3Driver extends AbstractHierarchicalFilesystemDriver
 {
+    /**
+     * Stored in sys_file_storage.driver and therefore fixed for the lifetime of
+     * every storage created with it.
+     */
+    public const DRIVER_TYPE = 'S3';
 
-    protected ?S3ObjectRepository $objects = null;
+
+    protected ?ObjectRepository $objects = null;
 
     /**
      * Read-only copies already downloaded during this request.
@@ -88,7 +95,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     public function processConfiguration(): void
     {
         $this->config = StorageConfiguration::fromArray($this->configuration);
-        $this->keys = new ObjectKeyMapper($this->config->bucket, $this->config->basePath);
+        $this->keys = new ObjectKeyMapper($this->config->basePath);
         $this->mimeTypes = new MimeTypeGuesser();
         $this->fileInfo = new FileInfoCache();
     }
@@ -102,7 +109,16 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             return;
         }
 
-        $this->objects = S3ObjectRepository::fromConfiguration($this->config);
+        $this->objects = $this->createObjectRepository();
+    }
+
+    /**
+     * The one seam the test suite uses: overriding this lets the very same
+     * driver run against an in-memory double instead of a real bucket.
+     */
+    protected function createObjectRepository(): ObjectRepository
+    {
+        return S3ObjectRepository::fromConfiguration($this->config);
     }
 
     public function mergeConfigurationCapabilities(Capabilities $capabilities): Capabilities
@@ -153,7 +169,13 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     public function isWithin(string $folderIdentifier, string $identifier): bool
     {
         $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
-        $identifier = $this->canonicalizeAndCheckFileIdentifier($identifier);
+
+        // A folder keeps its trailing slash. Canonicalising it as a file would
+        // strip it, and the comparison below could then never match - which the
+        // interface explicitly requires for a file mount's own root folder.
+        $identifier = str_ends_with($identifier, '/')
+            ? $this->canonicalizeAndCheckFolderIdentifier($identifier)
+            : $this->canonicalizeAndCheckFileIdentifier($identifier);
 
         if ($folderIdentifier === $identifier) {
             return true;
@@ -162,7 +184,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         return str_starts_with($identifier, $folderIdentifier);
     }
 
-    protected function objects(): S3ObjectRepository
+    protected function objects(): ObjectRepository
     {
         if ($this->objects === null) {
             throw new \RuntimeException(
@@ -361,7 +383,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         foreach ($this->objects()->listKeys($sourceFolderIdentifier === '/' ? '' : $sourcePrefix) as $key) {
             $targetKey = $targetPrefix . substr($key, strlen($sourcePrefix));
 
-            $this->objects()->copy($this->keys->toCopySource($key), $targetKey);
+            $this->objects()->copy($key, $targetKey);
             $this->fileInfo->flush($this->keys->toIdentifier($targetKey));
 
             // Folder markers are copied but not reported: the mapping tells FAL
@@ -528,7 +550,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $targetIdentifier = $this->getFileInFolder($this->sanitizeFileName($fileName), $targetFolderIdentifier);
 
         $this->objects()->copy(
-            $this->keys->toCopySource($this->keys->toObjectKey($fileIdentifier)),
+            $this->keys->toObjectKey($fileIdentifier),
             $this->keys->toObjectKey($targetIdentifier),
             $this->mimeTypes->guess($targetIdentifier)
         );

@@ -26,14 +26,28 @@
     "aws/aws-sdk-php": "^3.300",
     "typo3/cms-core": "^14.3"
   },
+  "autoload-dev": {
+    "psr-4": {
+      "MARCMAERDIAN\\FalS3Driver\\Tests\\": "Tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "test:unit": "phpunit --testsuite Unit",
+    "test:functional": "phpunit --testsuite Functional",
+    "lint": "find Classes Tests -name '*.php' -print0 | xargs -0 -n1 php -l"
+  },
   "autoload": {
     "psr-4": {
-      "MM\\FalS3Driver\\": "Classes/"
+      "MARCMAERDIAN\\FalS3Driver\\": "Classes/"
     }
   },
   "extra": {
     "typo3/cms": {
       "extension-key": "fal_s3_driver"
     }
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.5"
   }
 }

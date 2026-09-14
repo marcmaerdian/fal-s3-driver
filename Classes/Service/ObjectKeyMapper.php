@@ -14,7 +14,7 @@ declare(strict_types=1);
 *
 ***/
 
-namespace MM\FalS3Driver\Service;
+namespace MARCMAERDIAN\FalS3Driver\Service;
 
 /**
  * Translates between FAL identifiers and object keys.
@@ -27,7 +27,6 @@ namespace MM\FalS3Driver\Service;
 final readonly class ObjectKeyMapper
 {
     public function __construct(
-        private string $bucket,
         private string $basePath,
     ) {}
 
@@ -57,15 +56,6 @@ final readonly class ObjectKeyMapper
         return '/' . ltrim($key, '/');
     }
 
-    /**
-     * The CopySource value for copyObject(). AWS expects it URL encoded, yet
-     * the slashes separating the path segments must survive, so each segment is
-     * encoded on its own.
-     */
-    public function toCopySource(string $key): string
-    {
-        return $this->bucket . '/' . $this->encodeSegments($key);
-    }
 
     /**
      * Encodes a key for use in a public URL. rawurlencode() over the whole

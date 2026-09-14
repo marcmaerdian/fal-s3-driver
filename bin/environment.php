@@ -39,16 +39,22 @@ $read = static function (string $name) use ($suffix): string {
     return trim((string)(getenv($name . $suffix) ?: ''));
 };
 
+$missing = [];
 foreach (['S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY'] as $name) {
     if ($read($name) === '') {
-        fwrite(STDERR, sprintf("Missing environment variable: %s%s\n", $name, $suffix));
-        exit(1);
+        $missing[] = $name . $suffix;
     }
 }
 
-// The keys deliberately match the FlexForm field names, so this array can be
-// handed to the driver as its configuration without any translation.
-return [
+// Reporting is left to the caller: a CLI script wants to abort with a message,
+// a test wants to skip itself. Exiting here would kill the test runner.
+if ($missing !== []) {
+    return ['config' => null, 'missing' => $missing];
+}
+
+// The config keys deliberately match the FlexForm field names, so the array can
+// be handed to the driver as its configuration without any translation.
+return ['missing' => [], 'config' => [
     'environment' => $environment,
     'endpoint' => rtrim($read('S3_ENDPOINT'), '/'),
     'region' => $read('S3_REGION') ?: 'auto',
@@ -59,4 +65,4 @@ return [
     'basePath' => $read('S3_BASE_PATH'),
     'usePathStyleEndpoint' => $read('S3_PATH_STYLE') !== '0',
     'compatibilityMode' => $read('S3_COMPATIBILITY') !== '0',
-];
+]];

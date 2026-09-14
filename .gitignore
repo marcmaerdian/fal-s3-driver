@@ -1,8 +1,9 @@
-/vendor/
-/composer.lock
-/.idea/
 /.DS_Store
-/.phpunit.result.cache
-/public/
 /.env.local
+/.idea/
+/.phpunit.cache/
+/.phpunit.result.cache
+/composer.lock
+/public/
 /var/
+/vendor/

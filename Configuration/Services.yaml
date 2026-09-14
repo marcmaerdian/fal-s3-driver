@@ -1,0 +1,21 @@
+# This file is part of an extension for TYPO3 CMS.
+#
+# For the full copyright and license information, please read the
+# LICENSE.txt file that was distributed with this source code.
+#
+# (c) by 2026 Marc Märdian Softwaredevelopment
+# kontakt@marcmaerdian.de
+
+services:
+  _defaults:
+    autowire: true
+    autoconfigure: true
+    public: false
+
+  MARCMAERDIAN\FalS3Driver\:
+    resource: '../Classes/*'
+
+  # Registration happens through autoconfigure: since TYPO3 v14 a class
+  # implementing ExtractorInterface is tagged automatically.
+  MARCMAERDIAN\FalS3Driver\Index\ImageDimensionExtractor:
+    public: true

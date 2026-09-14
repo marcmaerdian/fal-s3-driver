@@ -14,12 +14,12 @@ declare(strict_types=1);
 *
 ***/
 
-namespace MM\FalS3Driver\Service;
+namespace MARCMAERDIAN\FalS3Driver\Service;
 
 use Aws\Exception\AwsException;
 use Aws\S3\MultipartUploader;
 use Aws\S3\S3Client;
-use MM\FalS3Driver\Configuration\StorageConfiguration;
+use MARCMAERDIAN\FalS3Driver\Configuration\StorageConfiguration;
 use Psr\Http\Message\StreamInterface;
 
 /**
@@ -29,7 +29,7 @@ use Psr\Http\Message\StreamInterface;
  * state of its own. That split is what allows the driver above it to be read as
  * plain FAL logic, without AWS vocabulary in between.
  */
-final class S3ObjectRepository
+final class S3ObjectRepository implements ObjectRepository
 {
     /**
      * Files above this size are uploaded in parts. A single PutObject is capped
@@ -238,7 +238,7 @@ final class S3ObjectRepository
         $arguments = [
             'Bucket' => $this->config->bucket,
             'Key' => $targetKey,
-            'CopySource' => $sourceKey,
+            'CopySource' => $this->toCopySource($sourceKey),
         ] + $this->getUploadOptions();
 
         if ($mimeType !== null) {
@@ -270,6 +270,15 @@ final class S3ObjectRepository
                 'Delete' => ['Objects' => array_map(static fn(string $key): array => ['Key' => $key], $chunk)],
             ]);
         }
+    }
+
+    /**
+     * AWS expects CopySource URL encoded, yet the slashes separating the path
+     * segments must survive, so each segment is encoded on its own.
+     */
+    private function toCopySource(string $key): string
+    {
+        return $this->config->bucket . '/' . implode('/', array_map(rawurlencode(...), explode('/', $key)));
     }
 
     /**
