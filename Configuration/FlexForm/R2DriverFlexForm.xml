@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<T3DataStructure>
+    <sheets>
+        <sDEF>
+            <ROOT>
+                <sheetTitle>Cloudflare R2</sheetTitle>
+                <type>array</type>
+                <el>
+                    <accountId>
+                        <label>Cloudflare Account ID</label>
+                        <description>Found in the Cloudflare dashboard, R2 section.</description>
+                        <config>
+                            <type>input</type>
+                            <size>40</size>
+                            <required>1</required>
+                        </config>
+                    </accountId>
+                    <bucket>
+                        <label>Bucket name</label>
+                        <config>
+                            <type>input</type>
+                            <size>40</size>
+                            <required>1</required>
+                        </config>
+                    </bucket>
+                    <accessKeyId>
+                        <label>Access Key ID</label>
+                        <config>
+                            <type>input</type>
+                            <size>40</size>
+                            <required>1</required>
+                        </config>
+                    </accessKeyId>
+                    <secretAccessKey>
+                        <label>Secret Access Key</label>
+                        <config>
+                            <type>password</type>
+                            <size>40</size>
+                            <required>1</required>
+                        </config>
+                    </secretAccessKey>
+                    <publicBaseUrl>
+                        <label>Public base URL</label>
+                        <description>Custom domain or r2.dev URL, without trailing slash.</description>
+                        <config>
+                            <type>input</type>
+                            <size>60</size>
+                        </config>
+                    </publicBaseUrl>
+                    <basePath>
+                        <label>Base path inside the bucket</label>
+                        <description>Optional prefix, e.g. "fileadmin". Leave empty for bucket root.</description>
+                        <config>
+                            <type>input</type>
+                            <size>40</size>
+                        </config>
+                    </basePath>
+                </el>
+            </ROOT>
+        </sDEF>
+    </sheets>
+</T3DataStructure>
