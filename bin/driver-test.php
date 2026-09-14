@@ -44,6 +44,8 @@ $prefix = $basePrefix . 'drivertest-' . $run;
 $seeded = [
     $prefix . '/readme.txt' => 'hello from the driver test',
     $prefix . '/images/logo.png' => 'not really a png',
+    $prefix . '/images/icon.svg' => '<svg></svg>',
+    $prefix . '/docs/deep/manual.txt' => 'deeply nested',
 ];
 
 printf("Environment: %s\n", $config['environment'] !== '' ? $config['environment'] : '(none)');
@@ -74,6 +76,43 @@ try {
         'getFileContents' => [$driver->getFileContents($root . '/readme.txt'), 'hello from the driver test'],
         'getRootLevelFolder' => [$driver->getRootLevelFolder(), '/'],
         'isWithin(match)' => [$driver->isWithin($root . '/', $root . '/readme.txt'), true],
+
+        // Listing: one level only
+        'getFilesInFolder(root)' => [
+            array_values($driver->getFilesInFolder($root . '/')),
+            [$root . '/readme.txt'],
+        ],
+        'getFoldersInFolder(root)' => [
+            array_values($driver->getFoldersInFolder($root . '/')),
+            [$root . '/docs/', $root . '/images/'],
+        ],
+        'getFilesInFolder(images)' => [
+            array_values($driver->getFilesInFolder($root . '/images/')),
+            [$root . '/images/icon.svg', $root . '/images/logo.png'],
+        ],
+
+        // Listing: recursive
+        'countFilesInFolder(recursive)' => [$driver->countFilesInFolder($root . '/', true), 4],
+        'countFilesInFolder(flat)' => [$driver->countFilesInFolder($root . '/'), 1],
+        'countFoldersInFolder(flat)' => [$driver->countFoldersInFolder($root . '/'), 2],
+        'countFoldersInFolder(recursive)' => [$driver->countFoldersInFolder($root . '/', true), 3],
+
+        // Paging
+        'getFilesInFolder(limit 1)' => [
+            count($driver->getFilesInFolder($root . '/', 0, 1, true)),
+            1,
+        ],
+
+        // File info
+        'fileInfo size' => [$driver->getFileInfoByIdentifier($root . '/readme.txt')['size'], 26],
+        'fileInfo name' => [$driver->getFileInfoByIdentifier($root . '/readme.txt')['name'], 'readme.txt'],
+        'fileInfo extension' => [$driver->getFileInfoByIdentifier($root . '/readme.txt')['extension'], 'txt'],
+        'fileInfo subset' => [
+            array_keys($driver->getFileInfoByIdentifier($root . '/readme.txt', ['size', 'name'])),
+            ['size', 'name'],
+        ],
+        'folderInfo name' => [$driver->getFolderInfoByIdentifier($root . '/images/')['name'], 'images'],
+        'hash(md5)' => [$driver->hash($root . '/readme.txt', 'md5'), md5('hello from the driver test')],
     ];
 
     $failed = 0;

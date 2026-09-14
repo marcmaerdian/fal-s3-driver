@@ -16,8 +16,11 @@ declare(strict_types=1);
 
 namespace Marcmaerdian\FalS3Driver\Driver;
 
+use Aws\Exception\AwsException;
 use Aws\S3\S3Client;
 use TYPO3\CMS\Core\Resource\Capabilities;
+use TYPO3\CMS\Core\Resource\Exception\FileDoesNotExistException;
+use TYPO3\CMS\Core\Resource\Exception\FolderDoesNotExistException;
 use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
 
 /**
@@ -195,6 +198,126 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         return (int)($result['KeyCount'] ?? 0) > 0;
     }
 
+    /**
+     * Lists one folder level. A flat object store has no directories, so the
+     * "folders" are derived from the common prefixes the API reports when a
+     * delimiter is given.
+     *
+     * @return array{files: array<string, string>, folders: array<string, string>}
+     */
+    protected function listFolder(string $folderIdentifier, bool $recursive = false): array
+    {
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+        $prefix = $this->getObjectKey($folderIdentifier);
+
+        $arguments = ['Bucket' => $this->bucket, 'Prefix' => $prefix];
+        if (!$recursive) {
+            // Without a delimiter the API returns every object below the
+            // prefix, no matter how deep. With it, anything deeper is folded
+            // into CommonPrefixes instead.
+            $arguments['Delimiter'] = '/';
+        }
+
+        $files = [];
+        $folders = [];
+
+        // The paginator hides the 1000 keys per response limit.
+        foreach ($this->getClient()->getPaginator('ListObjectsV2', $arguments) as $page) {
+            foreach ($page['Contents'] ?? [] as $object) {
+                $key = (string)$object['Key'];
+                // The zero byte object representing the folder itself is not
+                // one of its children.
+                if ($key === $prefix || str_ends_with($key, '/')) {
+                    continue;
+                }
+                $identifier = $this->getIdentifierFromObjectKey($key);
+                $files[$identifier] = $identifier;
+            }
+
+            foreach ($page['CommonPrefixes'] ?? [] as $commonPrefix) {
+                $identifier = $this->getIdentifierFromObjectKey((string)$commonPrefix['Prefix']);
+                $folders[$identifier] = $identifier;
+            }
+        }
+
+        if ($recursive) {
+            // Recursive listings have no CommonPrefixes, so the folders have
+            // to be reconstructed from the keys themselves.
+            foreach (array_keys($files) as $identifier) {
+                $parent = $this->canonicalizeAndCheckFolderIdentifier(dirname($identifier));
+                while ($parent !== '/' && $parent !== $folderIdentifier && !isset($folders[$parent])) {
+                    $folders[$parent] = $parent;
+                    $parent = $this->canonicalizeAndCheckFolderIdentifier(dirname(rtrim($parent, '/')));
+                }
+            }
+        }
+
+        ksort($files);
+        ksort($folders);
+
+        return ['files' => $files, 'folders' => $folders];
+    }
+
+    /**
+     * Copy of the LocalDriver behaviour: a filter returning -1 excludes the
+     * item, FALSE means the filter itself is broken.
+     *
+     * @param array<callable> $filterMethods
+     */
+    protected function applyFilterMethodsToDirectoryItem(
+        array $filterMethods,
+        string $itemName,
+        string $itemIdentifier,
+        string $parentIdentifier
+    ): bool {
+        foreach ($filterMethods as $filter) {
+            if (!is_callable($filter)) {
+                continue;
+            }
+            $result = $filter($itemName, $itemIdentifier, $parentIdentifier, [], $this);
+            if ($result === -1) {
+                return false;
+            }
+            if ($result === false) {
+                throw new \RuntimeException('Could not apply file/folder name filter.', 1789344002);
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param array<string, string> $items
+     * @param array<callable> $filterMethods
+     * @return array<string, string>
+     */
+    protected function filterAndSlice(
+        array $items,
+        string $parentIdentifier,
+        array $filterMethods,
+        int $start,
+        int $numberOfItems,
+        bool $sortRev
+    ): array {
+        $filtered = [];
+        foreach ($items as $identifier) {
+            $name = basename(rtrim($identifier, '/'));
+            if ($this->applyFilterMethodsToDirectoryItem($filterMethods, $name, $identifier, $parentIdentifier)) {
+                $filtered[$identifier] = $identifier;
+            }
+        }
+
+        if ($sortRev) {
+            $filtered = array_reverse($filtered, true);
+        }
+
+        if ($start > 0 || $numberOfItems > 0) {
+            $filtered = array_slice($filtered, $start, $numberOfItems > 0 ? $numberOfItems : null, true);
+        }
+
+        return $filtered;
+    }
+
     // ---------------------------------------------------------------------
     // Implemented in later stages.
     // ---------------------------------------------------------------------
@@ -311,7 +434,8 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function hash(string $fileIdentifier, string $hashAlgorithm): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        // TODO stage 6: stream the object instead of loading it into memory.
+        return hash($hashAlgorithm, $this->getFileContents($fileIdentifier));
     }
 
     public function moveFileWithinStorage(string $fileIdentifier, string $targetFolderIdentifier, string $newFileName): string
@@ -366,12 +490,68 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function getFileInfoByIdentifier(string $fileIdentifier, array $propertiesToExtract = []): array
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+
+        try {
+            $head = $this->getClient()->headObject([
+                'Bucket' => $this->bucket,
+                'Key' => $this->getObjectKey($fileIdentifier),
+            ]);
+        } catch (AwsException $exception) {
+            throw new FileDoesNotExistException(
+                'File ' . $fileIdentifier . ' does not exist.',
+                1789344003,
+                $exception
+            );
+        }
+
+        $lastModified = $head['LastModified'] ?? null;
+        $mtime = $lastModified instanceof \DateTimeInterface ? $lastModified->getTimestamp() : 0;
+
+        // An object store knows neither access nor inode change time, so the
+        // modification time stands in for all three.
+        $information = [
+            'size' => (int)($head['ContentLength'] ?? 0),
+            'atime' => $mtime,
+            'mtime' => $mtime,
+            'ctime' => $mtime,
+            'mimetype' => (string)($head['ContentType'] ?? 'application/octet-stream'),
+            'name' => basename($fileIdentifier),
+            'extension' => strtolower(pathinfo($fileIdentifier, PATHINFO_EXTENSION)),
+            'identifier' => $fileIdentifier,
+            'identifier_hash' => $this->hashIdentifier($fileIdentifier),
+            'storage' => $this->storageUid,
+            'folder_hash' => $this->hashIdentifier(
+                $this->canonicalizeAndCheckFolderIdentifier(dirname($fileIdentifier))
+            ),
+        ];
+
+        if ($propertiesToExtract === []) {
+            return $information;
+        }
+
+        return array_intersect_key($information, array_flip($propertiesToExtract));
     }
 
     public function getFolderInfoByIdentifier(string $folderIdentifier): array
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+
+        if (!$this->folderExists($folderIdentifier)) {
+            throw new FolderDoesNotExistException(
+                'Folder "' . $folderIdentifier . '" does not exist.',
+                1789344004
+            );
+        }
+
+        // Folders are virtual here, so they carry no timestamps of their own.
+        return [
+            'identifier' => $folderIdentifier,
+            'name' => basename(rtrim($folderIdentifier, '/')),
+            'mtime' => 0,
+            'ctime' => 0,
+            'storage' => $this->storageUid,
+        ];
     }
 
     public function getFileInFolder(string $fileName, string $folderIdentifier): string
@@ -388,7 +568,16 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         string $sort = '',
         bool $sortRev = false
     ): array {
-        throw $this->notImplemented(__FUNCTION__);
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+
+        return $this->filterAndSlice(
+            $this->listFolder($folderIdentifier, $recursive)['files'],
+            $folderIdentifier,
+            $filenameFilterCallbacks,
+            $start,
+            $numberOfItems,
+            $sortRev
+        );
     }
 
     public function getFolderInFolder(string $folderName, string $folderIdentifier): string
@@ -405,17 +594,26 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         string $sort = '',
         bool $sortRev = false
     ): array {
-        throw $this->notImplemented(__FUNCTION__);
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+
+        return $this->filterAndSlice(
+            $this->listFolder($folderIdentifier, $recursive)['folders'],
+            $folderIdentifier,
+            $folderNameFilterCallbacks,
+            $start,
+            $numberOfItems,
+            $sortRev
+        );
     }
 
     public function countFilesInFolder(string $folderIdentifier, bool $recursive = false, array $filenameFilterCallbacks = []): int
     {
-        throw $this->notImplemented(__FUNCTION__);
+        return count($this->getFilesInFolder($folderIdentifier, 0, 0, $recursive, $filenameFilterCallbacks));
     }
 
     public function countFoldersInFolder(string $folderIdentifier, bool $recursive = false, array $folderNameFilterCallbacks = []): int
     {
-        throw $this->notImplemented(__FUNCTION__);
+        return count($this->getFoldersInFolder($folderIdentifier, 0, 0, $recursive, $folderNameFilterCallbacks));
     }
 
     private function notImplemented(string $method): \RuntimeException
