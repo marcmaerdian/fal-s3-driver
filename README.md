@@ -68,6 +68,15 @@ The smoke test reads its credentials from the environment:
 ```bash
 export S3_ENDPOINT="..." S3_BUCKET="..." S3_ACCESS_KEY_ID="..." S3_SECRET_ACCESS_KEY="..."
 ```
+The smoke test reads its credentials from the environment. Set `S3_ENV` to
+select a suffix, so several environments can coexist:
+
+```bash
+export S3_ENDPOINT_INT="..." S3_BUCKET_INT="..." S3_ACCESS_KEY_ID_INT="..." S3_SECRET_ACCESS_KEY_INT="..."
+S3_ENV=INT php bin/s3-smoketest.php
+```
+
+Without `S3_ENV`, the unsuffixed names (`S3_ENDPOINT`, …) are used.
 
 ## License
 
