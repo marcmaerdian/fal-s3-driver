@@ -45,6 +45,13 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
      */
     protected array $localCopies = [];
 
+    /**
+     * Every temporary file created by this driver, removed on destruction.
+     *
+     * @var array<string, string>
+     */
+    protected array $temporaryPaths = [];
+
     protected string $endpoint = '';
     protected string $region = '';
     protected string $bucket = '';
@@ -54,6 +61,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     protected string $basePath = '';
     protected bool $usePathStyleEndpoint = true;
     protected bool $compatibilityMode = true;
+    protected bool $useContentHash = false;
 
     public function __construct(array $configuration = [])
     {
@@ -71,6 +79,13 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
      * Called right after the driver is built, with the FlexForm values
      * already present in $this->configuration.
      */
+    public function __destruct()
+    {
+        foreach ($this->temporaryPaths as $temporaryPath) {
+            @unlink($temporaryPath);
+        }
+    }
+
     public function processConfiguration(): void
     {
         $this->endpoint = rtrim(trim((string)($this->configuration['endpoint'] ?? '')), '/');
@@ -82,6 +97,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $this->basePath = trim((string)($this->configuration['basePath'] ?? ''), '/');
         $this->usePathStyleEndpoint = (bool)($this->configuration['usePathStyleEndpoint'] ?? true);
         $this->compatibilityMode = (bool)($this->configuration['compatibilityMode'] ?? true);
+        $this->useContentHash = (bool)($this->configuration['useContentHash'] ?? false);
     }
 
     /**
@@ -478,8 +494,16 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     public function createFolder(string $newFolderName, string $parentFolderIdentifier = '', bool $recursive = false): string
     {
         $parentFolderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($parentFolderIdentifier);
-        $newFolderName = $this->sanitizeFileName(trim($newFolderName, '/'));
-        $folderIdentifier = $this->getFolderInFolder($newFolderName, $parentFolderIdentifier);
+        $newFolderName = trim($newFolderName, '/');
+
+        // sanitizeFileName() turns a slash into an underscore, so a recursive
+        // name has to be split first and every segment cleaned on its own.
+        $segments = $recursive ? explode('/', $newFolderName) : [$newFolderName];
+        $segments = array_map($this->sanitizeFileName(...), array_filter($segments, static fn(string $part): bool => $part !== ''));
+
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier(
+            $parentFolderIdentifier . implode('/', $segments)
+        );
 
         // An object store has no directories, so an empty folder only exists
         // as a zero byte object whose key ends with a slash.
@@ -649,8 +673,31 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function hash(string $fileIdentifier, string $hashAlgorithm): string
     {
-        // TODO stage 6: stream the object instead of loading it into memory.
-        return hash($hashAlgorithm, $this->getFileContents($fileIdentifier));
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+
+        // TYPO3 calls hash() while indexing every single file. Downloading each
+        // of them would make the storage unusable, so the identifier hash is
+        // the default and content hashing has to be switched on deliberately.
+        if (!$this->useContentHash) {
+            return $this->hashIdentifier($fileIdentifier);
+        }
+
+        $body = $this->getClient()->getObject([
+            'Bucket' => $this->bucket,
+            'Key' => $this->getObjectKey($fileIdentifier),
+        ])['Body'];
+
+        if (!$body instanceof StreamInterface) {
+            return hash($hashAlgorithm, (string)$body);
+        }
+
+        // Hash in chunks: a large video must not have to fit into memory.
+        $context = hash_init($hashAlgorithm);
+        while (!$body->eof()) {
+            hash_update($context, $body->read(32768));
+        }
+
+        return hash_final($context);
     }
 
     public function moveFileWithinStorage(string $fileIdentifier, string $targetFolderIdentifier, string $newFileName): string
@@ -742,6 +789,16 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 $exception
             );
         }
+
+        // A failed SaveAs can leave the error body behind instead of the file.
+        if (!is_file($temporaryPath)) {
+            throw new FileDoesNotExistException(
+                'File ' . $fileIdentifier . ' could not be copied to a temporary path.',
+                1789344010
+            );
+        }
+
+        $this->temporaryPaths[$temporaryPath] = $temporaryPath;
 
         if (!$writable) {
             $this->localCopies[$fileIdentifier] = $temporaryPath;

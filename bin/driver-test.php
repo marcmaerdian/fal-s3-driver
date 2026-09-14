@@ -129,7 +129,10 @@ try {
             ['size', 'name'],
         ],
         'folderInfo name' => [$driver->getFolderInfoByIdentifier($root . '/images/')['name'], 'images'],
-        'hash(md5)' => [$driver->hash($root . '/readme.txt', 'md5'), md5('hello from the driver test')],
+        'hash(default is identifier hash)' => [
+            $driver->hash($root . '/readme.txt', 'md5'),
+            sha1($root . '/readme.txt'),
+        ],
     ];
 
     // --- writing -----------------------------------------------------------
@@ -188,6 +191,24 @@ try {
     ob_start();
     $driver->dumpFileContents($root . '/readme.txt');
     $assertions['dumpFileContents'] = [ob_get_clean(), 'hello from the driver test'];
+
+    // --- fixes verified against the reference implementation ---------------
+    $hashingDriver = new S3Driver($config + ['useContentHash' => true]);
+    $hashingDriver->processConfiguration();
+    $hashingDriver->initialize();
+    $assertions['content hash when enabled'] = [
+        $hashingDriver->hash($root . '/readme.txt', 'md5'),
+        md5('hello from the driver test'),
+    ];
+
+    $nested = $driver->createFolder('jahr/2026/bilder', $root . '/', true);
+    $assertions['createFolder recursive keeps depth'] = [$nested, $root . '/jahr/2026/bilder/'];
+    $assertions['recursive folder exists'] = [$driver->folderExists($nested), true];
+    $driver->deleteFolder($root . '/jahr/', true);
+
+    $flat = $driver->createFolder('jahr/2026', $root . '/');
+    $assertions['createFolder flat sanitises slash'] = [$flat, $root . '/jahr_2026/'];
+    $driver->deleteFolder($flat, true);
 
     $failed = 0;
     foreach ($assertions as $label => [$actual, $expected]) {

@@ -82,6 +82,15 @@
                             <default>1</default>
                         </config>
                     </usePathStyleEndpoint>
+                    <useContentHash>
+                        <label>Hash file contents</label>
+                        <description>Off by default: TYPO3 hashes every file while indexing, and hashing contents means downloading each file. Only switch this on if you rely on real content hashes.</description>
+                        <config>
+                            <type>check</type>
+                            <renderType>checkboxToggle</renderType>
+                            <default>0</default>
+                        </config>
+                    </useContentHash>
                     <compatibilityMode>
                         <label>Non-AWS compatibility mode</label>
                         <description>Disables the integrity checksums the AWS SDK sends by default. Required for R2 and most other non-AWS providers, which answer 501 Not Implemented otherwise.</description>
