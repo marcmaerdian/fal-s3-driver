@@ -17,6 +17,7 @@ declare(strict_types=1);
 namespace Marcmaerdian\FalS3Driver\Driver;
 
 use Aws\Exception\AwsException;
+use Aws\S3\MultipartUploader;
 use Aws\S3\S3Client;
 use Psr\Http\Message\StreamInterface;
 use TYPO3\CMS\Core\Resource\Capabilities;
@@ -36,6 +37,13 @@ use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
  */
 class S3Driver extends AbstractHierarchicalFilesystemDriver
 {
+    /**
+     * Files above this size are uploaded in parts. A single PutObject is
+     * capped at 5 GB by the S3 API, and a long running upload of a large file
+     * is far more likely to survive when it can retry individual parts.
+     */
+    protected int $multipartThreshold = 64 * 1024 * 1024;
+
     protected ?S3Client $client = null;
 
     /**
@@ -337,6 +345,12 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 if ($key === $prefix || str_ends_with($key, '/')) {
                     continue;
                 }
+
+                // Belt and braces: should a provider ignore the delimiter, do
+                // not let objects from deeper levels leak into a flat listing.
+                if (!$recursive && substr_count($key, '/') !== substr_count($prefix, '/')) {
+                    continue;
+                }
                 $identifier = $this->getIdentifierFromObjectKey($key);
                 $files[$identifier] = $identifier;
 
@@ -519,6 +533,34 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             : [];
     }
 
+    /**
+     * Uploads a local file, switching to a multipart upload for large ones.
+     */
+    protected function uploadFile(string $localFilePath, string $key, string $mimeType): void
+    {
+        $parameters = ['ContentType' => $mimeType] + $this->getUploadOptions();
+        $size = (int)filesize($localFilePath);
+
+        if ($size > $this->multipartThreshold) {
+            $uploader = new MultipartUploader($this->getClient(), $localFilePath, [
+                'bucket' => $this->bucket,
+                'key' => $key,
+                'params' => $parameters,
+            ]);
+            $uploader->upload();
+        } else {
+            // A multipart upload cannot handle zero byte files at all, and for
+            // small ones the extra round trips are not worth it.
+            $this->getClient()->putObject([
+                'Bucket' => $this->bucket,
+                'Key' => $key,
+                'SourceFile' => $localFilePath,
+            ] + $parameters);
+        }
+
+        $this->flushMetaInfoCache($this->getIdentifierFromObjectKey($key));
+    }
+
     protected function putObject(string $key, string $body, string $mimeType): void
     {
         $this->getClient()->putObject([
@@ -687,14 +729,11 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $newFileName = $this->sanitizeFileName($newFileName !== '' ? $newFileName : basename($localFilePath));
         $fileIdentifier = $this->getFileInFolder($newFileName, $targetFolderIdentifier);
 
-        $this->getClient()->putObject([
-            'Bucket' => $this->bucket,
-            'Key' => $this->getObjectKey($fileIdentifier),
-            'SourceFile' => $localFilePath,
-            'ContentType' => $this->detectMimeType($newFileName, $localFilePath),
-        ] + $this->getUploadOptions());
-
-        $this->flushMetaInfoCache($fileIdentifier);
+        $this->uploadFile(
+            $localFilePath,
+            $this->getObjectKey($fileIdentifier),
+            $this->detectMimeType($newFileName, $localFilePath)
+        );
 
         if ($removeOriginal) {
             unlink($localFilePath);
@@ -747,14 +786,11 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
 
-        $this->getClient()->putObject([
-            'Bucket' => $this->bucket,
-            'Key' => $this->getObjectKey($fileIdentifier),
-            'SourceFile' => $localFilePath,
-            'ContentType' => $this->detectMimeType($fileIdentifier, $localFilePath),
-        ] + $this->getUploadOptions());
-
-        $this->flushMetaInfoCache($fileIdentifier);
+        $this->uploadFile(
+            $localFilePath,
+            $this->getObjectKey($fileIdentifier),
+            $this->detectMimeType($fileIdentifier, $localFilePath)
+        );
 
         return true;
     }

@@ -271,6 +271,25 @@ try {
         '',
     ];
 
+    // --- multipart upload ---------------------------------------------------
+    $multipart = new S3Driver($config);
+    $multipart->processConfiguration();
+    $multipart->initialize();
+
+    // Lower the threshold instead of uploading 64 MB; S3 requires parts of at
+    // least 5 MB, so the payload still has to exceed that.
+    $thresholdProperty = new ReflectionProperty(S3Driver::class, 'multipartThreshold');
+    $thresholdProperty->setValue($multipart, 5 * 1024 * 1024);
+
+    $bigFile = tempnam(sys_get_temp_dir(), 'fals3big') . '.bin';
+    file_put_contents($bigFile, str_repeat('x', 6 * 1024 * 1024));
+    $bigIdentifier = $multipart->addFile($bigFile, $root . '/', 'large.bin');
+    $assertions['multipart upload size'] = [
+        $multipart->getFileInfoByIdentifier($bigIdentifier)['size'],
+        6 * 1024 * 1024,
+    ];
+    $assertions['multipart upload removed original'] = [file_exists($bigFile), false];
+
     // A write must invalidate what the listing cached.
     $counting->setFileContents($root . '/images/icon.svg', 'changed');
     $assertions['write invalidates cache'] = [
