@@ -22,12 +22,23 @@
         <testsuite name="Unit">
             <directory>Tests/Unit</directory>
         </testsuite>
-        <!-- The full driver against an in-memory object store. Still offline:
-             nothing in this repository ever talks to a real bucket. -->
+        <!-- The full driver against an in-memory object store. Offline. -->
         <testsuite name="Functional">
             <directory>Tests/Functional</directory>
         </testsuite>
+        <!-- The same behaviour against a real bucket. Excluded by default via
+             the group below, so it never runs unless asked for by name. -->
+        <testsuite name="Integration">
+            <directory>Tests/Integration</directory>
+        </testsuite>
     </testsuites>
+    <groups>
+        <exclude>
+            <!-- Costs money, needs credentials and writes to someone's bucket.
+                 Run deliberately: composer test:bucket -->
+            <group>bucket</group>
+        </exclude>
+    </groups>
     <source>
         <include>
             <directory>Classes</directory>
