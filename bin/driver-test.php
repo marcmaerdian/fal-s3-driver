@@ -115,6 +115,45 @@ try {
         'hash(md5)' => [$driver->hash($root . '/readme.txt', 'md5'), md5('hello from the driver test')],
     ];
 
+    // --- writing -----------------------------------------------------------
+    $writeRoot = $root . '/write/';
+    $created = $driver->createFolder('write', $root . '/');
+    $assertions['createFolder returns identifier'] = [$created, $writeRoot];
+    $assertions['createFolder -> folderExists'] = [$driver->folderExists($writeRoot), true];
+    $assertions['new folder is empty'] = [$driver->isFolderEmpty($writeRoot), true];
+
+    $newFile = $driver->createFile('note.txt', $writeRoot);
+    $assertions['createFile returns identifier'] = [$newFile, $writeRoot . 'note.txt'];
+    $assertions['setFileContents returns length'] = [$driver->setFileContents($newFile, 'written by the driver'), 21];
+    $assertions['read back written content'] = [$driver->getFileContents($newFile), 'written by the driver'];
+    $assertions['folder no longer empty'] = [$driver->isFolderEmpty($writeRoot), false];
+
+    $copied = $driver->copyFileWithinStorage($newFile, $writeRoot, 'copy.txt');
+    $assertions['copyFileWithinStorage'] = [$driver->getFileContents($copied), 'written by the driver'];
+
+    $renamed = $driver->renameFile($copied, 'renamed.txt');
+    $assertions['renameFile returns identifier'] = [$renamed, $writeRoot . 'renamed.txt'];
+    $assertions['renameFile removed source'] = [$driver->fileExists($copied), false];
+
+    $localFile = tempnam(sys_get_temp_dir(), 'fals3') . '.txt';
+    file_put_contents($localFile, 'uploaded from disk');
+    $added = $driver->addFile($localFile, $writeRoot, 'uploaded.txt');
+    $assertions['addFile'] = [$driver->getFileContents($added), 'uploaded from disk'];
+    $assertions['addFile removed original'] = [file_exists($localFile), false];
+
+    $assertions['sanitizeFileName'] = [$driver->sanitizeFileName('Bild mit Leerzeichen.PNG'), 'Bild_mit_Leerzeichen.PNG'];
+    $assertions['mimetype of uploaded'] = [$driver->getFileInfoByIdentifier($added)['mimetype'], 'text/plain'];
+
+    $moved = $driver->moveFolderWithinStorage($writeRoot, $root . '/', 'moved');
+    $assertions['moveFolderWithinStorage mapping'] = [count($moved), 3];
+    $assertions['moveFolder removed source'] = [$driver->folderExists($writeRoot), false];
+    $assertions['moveFolder created target'] = [$driver->folderExists($root . '/moved/'), true];
+
+    $assertions['deleteFile'] = [$driver->deleteFile($root . '/moved/note.txt'), true];
+    $assertions['deleteFile worked'] = [$driver->fileExists($root . '/moved/note.txt'), false];
+    $assertions['deleteFolder recursive'] = [$driver->deleteFolder($root . '/moved/', true), true];
+    $assertions['deleteFolder worked'] = [$driver->folderExists($root . '/moved/'), false];
+
     $failed = 0;
     foreach ($assertions as $label => [$actual, $expected]) {
         $ok = $actual === $expected;
@@ -129,9 +168,18 @@ try {
 
     printf("\n  getPublicUrl: %s\n", var_export($driver->getPublicUrl($root . '/readme.txt'), true));
 } finally {
-    foreach (array_keys($seeded) as $key) {
-        $client->deleteObject(['Bucket' => $config['bucket'], 'Key' => $key]);
+    // Remove everything below the test prefix, not just the seeded keys: the
+    // write tests create objects of their own.
+    $leftovers = [];
+    foreach ($client->getPaginator('ListObjectsV2', ['Bucket' => $config['bucket'], 'Prefix' => $prefix]) as $page) {
+        foreach ($page['Contents'] ?? [] as $object) {
+            $leftovers[] = ['Key' => (string)$object['Key']];
+        }
     }
+    if ($leftovers !== []) {
+        $client->deleteObjects(['Bucket' => $config['bucket'], 'Delete' => ['Objects' => $leftovers]]);
+    }
+    printf("\n  cleaned up %d object(s)\n", count($leftovers));
 }
 
 printf("\n%s\n", $failed === 0 ? 'ALL PASSED' : $failed . ' FAILED');

@@ -19,8 +19,11 @@ namespace Marcmaerdian\FalS3Driver\Driver;
 use Aws\Exception\AwsException;
 use Aws\S3\S3Client;
 use TYPO3\CMS\Core\Resource\Capabilities;
+use TYPO3\CMS\Core\Resource\Driver\LocalDriver;
 use TYPO3\CMS\Core\Resource\Exception\FileDoesNotExistException;
 use TYPO3\CMS\Core\Resource\Exception\FolderDoesNotExistException;
+use TYPO3\CMS\Core\Resource\Exception\InvalidFileNameException;
+use TYPO3\CMS\Core\Resource\MimeTypeDetector;
 use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
 
 /**
@@ -125,8 +128,25 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function sanitizeFileName(string $fileName): string
     {
-        // TODO stage 5: proper sanitisation
-        return $fileName;
+        $fileName = \Normalizer::normalize($fileName) ?: $fileName;
+
+        // Object keys are UTF-8 throughout, so unlike the LocalDriver there is
+        // no need for a non-UTF-8 filesystem branch.
+        $cleanFileName = (string)preg_replace(
+            '/[' . LocalDriver::UNSAFE_FILENAME_CHARACTER_EXPRESSION . ']/u',
+            '_',
+            trim($fileName)
+        );
+
+        // A trailing dot would make the key indistinguishable from a folder
+        // marker in some clients.
+        $cleanFileName = rtrim($cleanFileName, '.');
+
+        if ($cleanFileName === '') {
+            throw new InvalidFileNameException('File name ' . $fileName . ' is invalid.', 1789344005);
+        }
+
+        return $cleanFileName;
     }
 
     public function getPermissions(string $identifier): array
@@ -318,6 +338,118 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         return $filtered;
     }
 
+    /**
+     * Builds the CopySource value for copyObject(). AWS expects it URL
+     * encoded, but the slashes separating the path segments must survive.
+     */
+    protected function getCopySource(string $key): string
+    {
+        $segments = array_map(rawurlencode(...), explode('/', $key));
+
+        return $this->bucket . '/' . implode('/', $segments);
+    }
+
+    protected function detectMimeType(string $fileName, ?string $localFilePath = null): string
+    {
+        if ($localFilePath !== null && is_readable($localFilePath)) {
+            $detected = @mime_content_type($localFilePath);
+            if (is_string($detected) && $detected !== '') {
+                return $detected;
+            }
+        }
+
+        $extension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+        if ($extension !== '') {
+            $candidates = (new MimeTypeDetector())->getMimeTypesForFileExtension($extension);
+            if ($candidates !== []) {
+                return (string)reset($candidates);
+            }
+        }
+
+        return 'application/octet-stream';
+    }
+
+    /**
+     * Every object key below the given folder, as raw keys.
+     *
+     * @return array<int, string>
+     */
+    protected function getObjectKeysInFolder(string $folderIdentifier): array
+    {
+        $prefix = $this->getObjectKey($this->canonicalizeAndCheckFolderIdentifier($folderIdentifier));
+
+        $keys = [];
+        foreach ($this->getClient()->getPaginator('ListObjectsV2', ['Bucket' => $this->bucket, 'Prefix' => $prefix]) as $page) {
+            foreach ($page['Contents'] ?? [] as $object) {
+                $keys[] = (string)$object['Key'];
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * @param array<int, string> $keys
+     */
+    protected function deleteObjectKeys(array $keys): void
+    {
+        if ($keys === []) {
+            return;
+        }
+
+        // DeleteObjects accepts at most 1000 keys per call.
+        foreach (array_chunk($keys, 1000) as $chunk) {
+            $this->getClient()->deleteObjects([
+                'Bucket' => $this->bucket,
+                'Delete' => ['Objects' => array_map(static fn(string $key): array => ['Key' => $key], $chunk)],
+            ]);
+        }
+    }
+
+    protected function putObject(string $key, string $body, string $mimeType): void
+    {
+        $this->getClient()->putObject([
+            'Bucket' => $this->bucket,
+            'Key' => $key,
+            'Body' => $body,
+            'ContentType' => $mimeType,
+        ]);
+    }
+
+    /**
+     * Copies everything below a folder to a new prefix and reports the mapping
+     * of old to new identifiers, which is what FAL needs to update its records.
+     *
+     * @return array<string, string>
+     */
+    protected function copyFolderContents(string $sourceFolderIdentifier, string $targetFolderIdentifier): array
+    {
+        $sourceFolderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($sourceFolderIdentifier);
+        $targetFolderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($targetFolderIdentifier);
+
+        $sourcePrefix = $this->getObjectKey($sourceFolderIdentifier);
+        $targetPrefix = $this->getObjectKey($targetFolderIdentifier);
+
+        $mapping = [];
+        foreach ($this->getObjectKeysInFolder($sourceFolderIdentifier) as $key) {
+            $targetKey = $targetPrefix . substr($key, strlen($sourcePrefix));
+
+            $this->getClient()->copyObject([
+                'Bucket' => $this->bucket,
+                'Key' => $targetKey,
+                'CopySource' => $this->getCopySource($key),
+            ]);
+
+            // Folder markers are copied but not reported: the mapping tells FAL
+            // which file records to rewrite, and a marker has no record.
+            if (!str_ends_with($key, '/')) {
+                $mapping[$this->getIdentifierFromObjectKey($key)] = $this->getIdentifierFromObjectKey($targetKey);
+            }
+        }
+
+        return $mapping;
+    }
+
     // ---------------------------------------------------------------------
     // Implemented in later stages.
     // ---------------------------------------------------------------------
@@ -340,17 +472,40 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function createFolder(string $newFolderName, string $parentFolderIdentifier = '', bool $recursive = false): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $parentFolderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($parentFolderIdentifier);
+        $newFolderName = $this->sanitizeFileName(trim($newFolderName, '/'));
+        $folderIdentifier = $this->getFolderInFolder($newFolderName, $parentFolderIdentifier);
+
+        // An object store has no directories, so an empty folder only exists
+        // as a zero byte object whose key ends with a slash.
+        $this->putObject($this->getObjectKey($folderIdentifier), '', 'application/x-directory');
+
+        return $folderIdentifier;
     }
 
     public function renameFolder(string $folderIdentifier, string $newName): array
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+        $parentFolderIdentifier = $this->canonicalizeAndCheckFolderIdentifier(dirname(rtrim($folderIdentifier, '/')));
+
+        // A rename is a move inside the same parent folder.
+        return $this->moveFolderWithinStorage($folderIdentifier, $parentFolderIdentifier, $newName);
     }
 
     public function deleteFolder(string $folderIdentifier, bool $deleteRecursively = false): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $folderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($folderIdentifier);
+
+        if (!$deleteRecursively && !$this->isFolderEmpty($folderIdentifier)) {
+            throw new \RuntimeException(
+                'Folder "' . $folderIdentifier . '" is not empty.',
+                1789344006
+            );
+        }
+
+        $this->deleteObjectKeys($this->getObjectKeysInFolder($folderIdentifier));
+
+        return true;
     }
 
     public function fileExists(string $fileIdentifier): bool
@@ -404,32 +559,87 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function addFile(string $localFilePath, string $targetFolderIdentifier, string $newFileName = '', bool $removeOriginal = true): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        if (!is_readable($localFilePath)) {
+            throw new \InvalidArgumentException('File ' . $localFilePath . ' is not readable.', 1789344007);
+        }
+
+        $newFileName = $this->sanitizeFileName($newFileName !== '' ? $newFileName : basename($localFilePath));
+        $fileIdentifier = $this->getFileInFolder($newFileName, $targetFolderIdentifier);
+
+        $this->getClient()->putObject([
+            'Bucket' => $this->bucket,
+            'Key' => $this->getObjectKey($fileIdentifier),
+            'SourceFile' => $localFilePath,
+            'ContentType' => $this->detectMimeType($newFileName, $localFilePath),
+        ]);
+
+        if ($removeOriginal) {
+            unlink($localFilePath);
+        }
+
+        return $fileIdentifier;
     }
 
     public function createFile(string $fileName, string $parentFolderIdentifier): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $fileName = $this->sanitizeFileName($fileName);
+        $fileIdentifier = $this->getFileInFolder($fileName, $parentFolderIdentifier);
+
+        $this->putObject($this->getObjectKey($fileIdentifier), '', $this->detectMimeType($fileName));
+
+        return $fileIdentifier;
     }
 
     public function copyFileWithinStorage(string $fileIdentifier, string $targetFolderIdentifier, string $fileName): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+        $targetIdentifier = $this->getFileInFolder($this->sanitizeFileName($fileName), $targetFolderIdentifier);
+
+        $this->getClient()->copyObject([
+            'Bucket' => $this->bucket,
+            'Key' => $this->getObjectKey($targetIdentifier),
+            'CopySource' => $this->getCopySource($this->getObjectKey($fileIdentifier)),
+        ]);
+
+        return $targetIdentifier;
     }
 
     public function renameFile(string $fileIdentifier, string $newName): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+        $parentFolderIdentifier = $this->canonicalizeAndCheckFolderIdentifier(dirname($fileIdentifier));
+
+        return $this->moveFileWithinStorage($fileIdentifier, $parentFolderIdentifier, $newName);
     }
 
     public function replaceFile(string $fileIdentifier, string $localFilePath): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        if (!is_readable($localFilePath)) {
+            throw new \InvalidArgumentException('File ' . $localFilePath . ' is not readable.', 1789344008);
+        }
+
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+
+        $this->getClient()->putObject([
+            'Bucket' => $this->bucket,
+            'Key' => $this->getObjectKey($fileIdentifier),
+            'SourceFile' => $localFilePath,
+            'ContentType' => $this->detectMimeType($fileIdentifier, $localFilePath),
+        ]);
+
+        return true;
     }
 
     public function deleteFile(string $fileIdentifier): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+
+        $this->getClient()->deleteObject([
+            'Bucket' => $this->bucket,
+            'Key' => $this->getObjectKey($fileIdentifier),
+        ]);
+
+        return true;
     }
 
     public function hash(string $fileIdentifier, string $hashAlgorithm): string
@@ -440,17 +650,30 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function moveFileWithinStorage(string $fileIdentifier, string $targetFolderIdentifier, string $newFileName): string
     {
-        throw $this->notImplemented(__FUNCTION__);
+        // S3 has no rename: a move is a copy followed by a delete.
+        $targetIdentifier = $this->copyFileWithinStorage($fileIdentifier, $targetFolderIdentifier, $newFileName);
+        $this->deleteFile($fileIdentifier);
+
+        return $targetIdentifier;
     }
 
     public function moveFolderWithinStorage(string $sourceFolderIdentifier, string $targetFolderIdentifier, string $newFolderName): array
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $sourceFolderIdentifier = $this->canonicalizeAndCheckFolderIdentifier($sourceFolderIdentifier);
+        $destination = $this->getFolderInFolder($this->sanitizeFileName($newFolderName), $targetFolderIdentifier);
+
+        $mapping = $this->copyFolderContents($sourceFolderIdentifier, $destination);
+        $this->deleteObjectKeys($this->getObjectKeysInFolder($sourceFolderIdentifier));
+
+        return $mapping;
     }
 
     public function copyFolderWithinStorage(string $sourceFolderIdentifier, string $targetFolderIdentifier, string $newFolderName): bool
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $destination = $this->getFolderInFolder($this->sanitizeFileName($newFolderName), $targetFolderIdentifier);
+        $this->copyFolderContents($sourceFolderIdentifier, $destination);
+
+        return true;
     }
 
     public function getFileContents(string $fileIdentifier): string
@@ -465,7 +688,15 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
 
     public function setFileContents(string $fileIdentifier, string $contents): int
     {
-        throw $this->notImplemented(__FUNCTION__);
+        $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
+
+        $this->putObject(
+            $this->getObjectKey($fileIdentifier),
+            $contents,
+            $this->detectMimeType($fileIdentifier)
+        );
+
+        return strlen($contents);
     }
 
     public function fileExistsInFolder(string $fileName, string $folderIdentifier): bool
