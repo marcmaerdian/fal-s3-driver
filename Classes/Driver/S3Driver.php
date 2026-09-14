@@ -52,6 +52,15 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
      */
     protected array $temporaryPaths = [];
 
+    /**
+     * File information already known in this request, keyed by identifier.
+     * ListObjectsV2 reports size and timestamp for every object it returns, so
+     * a listing can fill this instead of triggering one HeadObject per file.
+     *
+     * @var array<string, array<string, mixed>>
+     */
+    protected array $metaInfoCache = [];
+
     protected string $endpoint = '';
     protected string $region = '';
     protected string $bucket = '';
@@ -62,6 +71,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     protected bool $usePathStyleEndpoint = true;
     protected bool $compatibilityMode = true;
     protected bool $useContentHash = false;
+    protected int $cacheControlMaxAge = 0;
 
     public function __construct(array $configuration = [])
     {
@@ -98,6 +108,7 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         $this->usePathStyleEndpoint = (bool)($this->configuration['usePathStyleEndpoint'] ?? true);
         $this->compatibilityMode = (bool)($this->configuration['compatibilityMode'] ?? true);
         $this->useContentHash = (bool)($this->configuration['useContentHash'] ?? false);
+        $this->cacheControlMaxAge = max(0, (int)($this->configuration['cacheControlMaxAge'] ?? 0));
     }
 
     /**
@@ -244,6 +255,57 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     }
 
     /**
+     * Builds the file information array for one object.
+     *
+     * $mimeType is optional because ListObjectsV2 does not report content
+     * types. Deriving it from the extension keeps a folder listing at a single
+     * request instead of one HeadObject per file.
+     *
+     * @return array<string, mixed>
+     */
+    protected function buildFileInfo(string $fileIdentifier, int $size, int $mtime, ?string $mimeType = null): array
+    {
+        return [
+            'size' => $size,
+            // An object store knows neither access nor inode change time, so
+            // the modification time stands in for all three.
+            'atime' => $mtime,
+            'mtime' => $mtime,
+            'ctime' => $mtime,
+            'mimetype' => $mimeType ?? $this->detectMimeType($fileIdentifier),
+            'name' => basename($fileIdentifier),
+            'extension' => strtolower(pathinfo($fileIdentifier, PATHINFO_EXTENSION)),
+            'identifier' => $fileIdentifier,
+            'identifier_hash' => $this->hashIdentifier($fileIdentifier),
+            'storage' => $this->storageUid,
+            'folder_hash' => $this->hashIdentifier(
+                $this->canonicalizeAndCheckFolderIdentifier(dirname($fileIdentifier))
+            ),
+        ];
+    }
+
+    /**
+     * Drops cached information after a write, for the object itself and for
+     * anything below it if it is a folder.
+     */
+    protected function flushMetaInfoCache(string $identifier = ''): void
+    {
+        if ($identifier === '') {
+            $this->metaInfoCache = [];
+
+            return;
+        }
+
+        unset($this->metaInfoCache[$identifier]);
+
+        foreach (array_keys($this->metaInfoCache) as $cached) {
+            if (str_starts_with($cached, rtrim($identifier, '/') . '/')) {
+                unset($this->metaInfoCache[$cached]);
+            }
+        }
+    }
+
+    /**
      * Lists one folder level. A flat object store has no directories, so the
      * "folders" are derived from the common prefixes the API reports when a
      * delimiter is given.
@@ -277,6 +339,15 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 }
                 $identifier = $this->getIdentifierFromObjectKey($key);
                 $files[$identifier] = $identifier;
+
+                // The listing already carries size and timestamp, so remember
+                // them instead of asking for each file separately later on.
+                $lastModified = $object['LastModified'] ?? null;
+                $this->metaInfoCache[$identifier] = $this->buildFileInfo(
+                    $identifier,
+                    (int)($object['Size'] ?? 0),
+                    $lastModified instanceof \DateTimeInterface ? $lastModified->getTimestamp() : 0
+                );
             }
 
             foreach ($page['CommonPrefixes'] ?? [] as $commonPrefix) {
@@ -422,6 +493,10 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             return;
         }
 
+        foreach ($keys as $key) {
+            $this->flushMetaInfoCache($this->getIdentifierFromObjectKey($key));
+        }
+
         // DeleteObjects accepts at most 1000 keys per call.
         foreach (array_chunk($keys, 1000) as $chunk) {
             $this->getClient()->deleteObjects([
@@ -431,6 +506,19 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
         }
     }
 
+    /**
+     * Cache-Control for uploaded objects. Without it the CDN in front of the
+     * bucket decides on its own how long it keeps a file.
+     *
+     * @return array<string, string>
+     */
+    protected function getUploadOptions(): array
+    {
+        return $this->cacheControlMaxAge > 0
+            ? ['CacheControl' => 'max-age=' . $this->cacheControlMaxAge]
+            : [];
+    }
+
     protected function putObject(string $key, string $body, string $mimeType): void
     {
         $this->getClient()->putObject([
@@ -438,7 +526,9 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'Key' => $key,
             'Body' => $body,
             'ContentType' => $mimeType,
-        ]);
+        ] + $this->getUploadOptions());
+
+        $this->flushMetaInfoCache($this->getIdentifierFromObjectKey($key));
     }
 
     /**
@@ -463,7 +553,9 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
                 'Bucket' => $this->bucket,
                 'Key' => $targetKey,
                 'CopySource' => $this->getCopySource($key),
-            ]);
+            ] + $this->getUploadOptions());
+
+            $this->flushMetaInfoCache($this->getIdentifierFromObjectKey($targetKey));
 
             // Folder markers are copied but not reported: the mapping tells FAL
             // which file records to rewrite, and a marker has no record.
@@ -600,7 +692,9 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'Key' => $this->getObjectKey($fileIdentifier),
             'SourceFile' => $localFilePath,
             'ContentType' => $this->detectMimeType($newFileName, $localFilePath),
-        ]);
+        ] + $this->getUploadOptions());
+
+        $this->flushMetaInfoCache($fileIdentifier);
 
         if ($removeOriginal) {
             unlink($localFilePath);
@@ -628,7 +722,11 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'Bucket' => $this->bucket,
             'Key' => $this->getObjectKey($targetIdentifier),
             'CopySource' => $this->getCopySource($this->getObjectKey($fileIdentifier)),
-        ]);
+            'MetadataDirective' => 'REPLACE',
+            'ContentType' => $this->detectMimeType($targetIdentifier),
+        ] + $this->getUploadOptions());
+
+        $this->flushMetaInfoCache($targetIdentifier);
 
         return $targetIdentifier;
     }
@@ -654,7 +752,9 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'Key' => $this->getObjectKey($fileIdentifier),
             'SourceFile' => $localFilePath,
             'ContentType' => $this->detectMimeType($fileIdentifier, $localFilePath),
-        ]);
+        ] + $this->getUploadOptions());
+
+        $this->flushMetaInfoCache($fileIdentifier);
 
         return true;
     }
@@ -667,6 +767,8 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
             'Bucket' => $this->bucket,
             'Key' => $this->getObjectKey($fileIdentifier),
         ]);
+
+        $this->flushMetaInfoCache($fileIdentifier);
 
         return true;
     }
@@ -833,39 +935,32 @@ class S3Driver extends AbstractHierarchicalFilesystemDriver
     {
         $fileIdentifier = $this->canonicalizeAndCheckFileIdentifier($fileIdentifier);
 
-        try {
-            $head = $this->getClient()->headObject([
-                'Bucket' => $this->bucket,
-                'Key' => $this->getObjectKey($fileIdentifier),
-            ]);
-        } catch (AwsException $exception) {
-            throw new FileDoesNotExistException(
-                'File ' . $fileIdentifier . ' does not exist.',
-                1789344003,
-                $exception
+        $information = $this->metaInfoCache[$fileIdentifier] ?? null;
+
+        if ($information === null) {
+            try {
+                $head = $this->getClient()->headObject([
+                    'Bucket' => $this->bucket,
+                    'Key' => $this->getObjectKey($fileIdentifier),
+                ]);
+            } catch (AwsException $exception) {
+                throw new FileDoesNotExistException(
+                    'File ' . $fileIdentifier . ' does not exist.',
+                    1789344003,
+                    $exception
+                );
+            }
+
+            $lastModified = $head['LastModified'] ?? null;
+            $information = $this->buildFileInfo(
+                $fileIdentifier,
+                (int)($head['ContentLength'] ?? 0),
+                $lastModified instanceof \DateTimeInterface ? $lastModified->getTimestamp() : 0,
+                (string)($head['ContentType'] ?? 'application/octet-stream')
             );
+
+            $this->metaInfoCache[$fileIdentifier] = $information;
         }
-
-        $lastModified = $head['LastModified'] ?? null;
-        $mtime = $lastModified instanceof \DateTimeInterface ? $lastModified->getTimestamp() : 0;
-
-        // An object store knows neither access nor inode change time, so the
-        // modification time stands in for all three.
-        $information = [
-            'size' => (int)($head['ContentLength'] ?? 0),
-            'atime' => $mtime,
-            'mtime' => $mtime,
-            'ctime' => $mtime,
-            'mimetype' => (string)($head['ContentType'] ?? 'application/octet-stream'),
-            'name' => basename($fileIdentifier),
-            'extension' => strtolower(pathinfo($fileIdentifier, PATHINFO_EXTENSION)),
-            'identifier' => $fileIdentifier,
-            'identifier_hash' => $this->hashIdentifier($fileIdentifier),
-            'storage' => $this->storageUid,
-            'folder_hash' => $this->hashIdentifier(
-                $this->canonicalizeAndCheckFolderIdentifier(dirname($fileIdentifier))
-            ),
-        ];
 
         if ($propertiesToExtract === []) {
             return $information;

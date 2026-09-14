@@ -82,6 +82,18 @@
                             <default>1</default>
                         </config>
                     </usePathStyleEndpoint>
+                    <cacheControlMaxAge>
+                        <label>Cache-Control max-age (seconds)</label>
+                        <description>Sent with every upload. 0 leaves the header off, so the CDN in front of the bucket decides on its own. 604800 is one week.</description>
+                        <config>
+                            <type>number</type>
+                            <size>10</size>
+                            <default>0</default>
+                            <range>
+                                <lower>0</lower>
+                            </range>
+                        </config>
+                    </cacheControlMaxAge>
                     <useContentHash>
                         <label>Hash file contents</label>
                         <description>Off by default: TYPO3 hashes every file while indexing, and hashing contents means downloading each file. Only switch this on if you rely on real content hashes.</description>

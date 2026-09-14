@@ -210,6 +210,74 @@ try {
     $assertions['createFolder flat sanitises slash'] = [$flat, $root . '/jahr_2026/'];
     $driver->deleteFolder($flat, true);
 
+    // --- metadata cache -----------------------------------------------------
+    $counting = new S3Driver($config);
+    $counting->processConfiguration();
+    $counting->initialize();
+
+    // Reach into the protected client instead of adding a test-only accessor
+    // to the driver's public API.
+    $clientProperty = new ReflectionProperty(S3Driver::class, 'client');
+    $countingClient = $clientProperty->getValue($counting);
+
+    $requests = 0;
+    $countingClient->getHandlerList()->appendSign(
+        \Aws\Middleware::tap(static function ($command) use (&$requests): void {
+            if ($command->getName() === 'HeadObject') {
+                $requests++;
+            }
+        }),
+        'count-head'
+    );
+
+    $files = $counting->getFilesInFolder($root . '/images/');
+    foreach ($files as $identifier) {
+        $counting->getFileInfoByIdentifier($identifier);
+    }
+    $assertions['listing serves file info without HeadObject'] = [$requests, 0];
+    $assertions['cached size is correct'] = [
+        $counting->getFileInfoByIdentifier($root . '/images/icon.svg')['size'],
+        11,
+    ];
+
+    // Without a listing the first lookup must still fall back to HeadObject.
+    $cold = new S3Driver($config);
+    $cold->processConfiguration();
+    $cold->initialize();
+    $assertions['cold lookup still works'] = [
+        $cold->getFileInfoByIdentifier($root . '/readme.txt')['size'],
+        26,
+    ];
+
+    // --- cache control ------------------------------------------------------
+    $cached = new S3Driver($config + ['cacheControlMaxAge' => 604800]);
+    $cached->processConfiguration();
+    $cached->initialize();
+    $cached->setFileContents($root . '/cached.txt', 'with cache control');
+    $header = $client->headObject([
+        'Bucket' => $config['bucket'],
+        'Key' => $prefix . '/cached.txt',
+    ]);
+    $assertions['CacheControl reaches the object'] = [
+        (string)($header['CacheControl'] ?? ''),
+        'max-age=604800',
+    ];
+
+    $plain = $driver->createFile('plain.txt', $root . '/');
+    $driver->setFileContents($plain, 'no cache control');
+    $headerPlain = $client->headObject(['Bucket' => $config['bucket'], 'Key' => $prefix . '/plain.txt']);
+    $assertions['no header when max-age is 0'] = [
+        (string)($headerPlain['CacheControl'] ?? ''),
+        '',
+    ];
+
+    // A write must invalidate what the listing cached.
+    $counting->setFileContents($root . '/images/icon.svg', 'changed');
+    $assertions['write invalidates cache'] = [
+        $counting->getFileInfoByIdentifier($root . '/images/icon.svg')['size'],
+        7,
+    ];
+
     $failed = 0;
     foreach ($assertions as $label => [$actual, $expected]) {
         $ok = $actual === $expected;
