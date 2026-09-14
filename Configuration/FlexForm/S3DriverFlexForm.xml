@@ -12,18 +12,27 @@
     <sheets>
         <sDEF>
             <ROOT>
-                <sheetTitle>Cloudflare R2</sheetTitle>
+                <sheetTitle>S3-compatible storage</sheetTitle>
                 <type>array</type>
                 <el>
-                    <accountId>
-                        <label>Cloudflare Account ID</label>
-                        <description>Found in the Cloudflare dashboard, R2 section.</description>
+                    <endpoint>
+                        <label>Endpoint URL</label>
+                        <description>Full API endpoint, e.g. https://ACCOUNT.r2.cloudflarestorage.com (Cloudflare R2), https://fsn1.your-objectstorage.com (Hetzner) or http://localhost:9000 (MinIO). This is not the URL visitors use.</description>
                         <config>
                             <type>input</type>
-                            <size>40</size>
+                            <size>60</size>
                             <required>1</required>
                         </config>
-                    </accountId>
+                    </endpoint>
+                    <region>
+                        <label>Region</label>
+                        <description>Leave empty for "auto". Providers without regions still need a value for request signing.</description>
+                        <config>
+                            <type>input</type>
+                            <size>20</size>
+                            <default>auto</default>
+                        </config>
+                    </region>
                     <bucket>
                         <label>Bucket name</label>
                         <config>
@@ -50,7 +59,7 @@
                     </secretAccessKey>
                     <publicBaseUrl>
                         <label>Public base URL</label>
-                        <description>Custom domain or r2.dev URL, without trailing slash.</description>
+                        <description>Where visitors fetch files from: custom domain, r2.dev URL or CDN. Without trailing slash. Leave empty for a private storage.</description>
                         <config>
                             <type>input</type>
                             <size>60</size>
@@ -64,6 +73,24 @@
                             <size>40</size>
                         </config>
                     </basePath>
+                    <usePathStyleEndpoint>
+                        <label>Use path-style endpoint</label>
+                        <description>Bucket in the path (endpoint/bucket/key) instead of as a subdomain. Required by R2 and MinIO; AWS S3 prefers virtual-hosted style.</description>
+                        <config>
+                            <type>check</type>
+                            <renderType>checkboxToggle</renderType>
+                            <default>1</default>
+                        </config>
+                    </usePathStyleEndpoint>
+                    <compatibilityMode>
+                        <label>Non-AWS compatibility mode</label>
+                        <description>Disables the integrity checksums the AWS SDK sends by default. Required for R2 and most other non-AWS providers, which answer 501 Not Implemented otherwise.</description>
+                        <config>
+                            <type>check</type>
+                            <renderType>checkboxToggle</renderType>
+                            <default>1</default>
+                        </config>
+                    </compatibilityMode>
                 </el>
             </ROOT>
         </sDEF>

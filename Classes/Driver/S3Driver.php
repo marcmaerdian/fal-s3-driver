@@ -14,24 +14,31 @@ declare(strict_types=1);
 *
 ***/
 
-namespace Marcmaerdian\FalR2Driver\Driver;
+namespace Marcmaerdian\FalS3Driver\Driver;
 
+use Aws\S3\S3Client;
 use TYPO3\CMS\Core\Resource\Capabilities;
 use TYPO3\CMS\Core\Resource\Driver\AbstractHierarchicalFilesystemDriver;
 
 /**
- * FAL driver for Cloudflare R2 object storage.
+ * FAL driver for S3-compatible object storage.
  *
- * R2 speaks the S3 API, so this driver talks S3 against an R2 endpoint.
+ * Works with any provider speaking the S3 API: Cloudflare R2, Hetzner
+ * Object Storage, MinIO, Backblaze B2, Wasabi, AWS S3 itself.
  */
-class R2Driver extends AbstractHierarchicalFilesystemDriver
+class S3Driver extends AbstractHierarchicalFilesystemDriver
 {
-    protected string $accountId = '';
+    protected ?S3Client $client = null;
+
+    protected string $endpoint = '';
+    protected string $region = '';
     protected string $bucket = '';
     protected string $accessKeyId = '';
     protected string $secretAccessKey = '';
     protected string $publicBaseUrl = '';
     protected string $basePath = '';
+    protected bool $usePathStyleEndpoint = true;
+    protected bool $compatibilityMode = true;
 
     public function __construct(array $configuration = [])
     {
@@ -51,12 +58,15 @@ class R2Driver extends AbstractHierarchicalFilesystemDriver
      */
     public function processConfiguration(): void
     {
-        $this->accountId = trim((string)($this->configuration['accountId'] ?? ''));
+        $this->endpoint = rtrim(trim((string)($this->configuration['endpoint'] ?? '')), '/');
+        $this->region = trim((string)($this->configuration['region'] ?? ''));
         $this->bucket = trim((string)($this->configuration['bucket'] ?? ''));
         $this->accessKeyId = trim((string)($this->configuration['accessKeyId'] ?? ''));
         $this->secretAccessKey = trim((string)($this->configuration['secretAccessKey'] ?? ''));
         $this->publicBaseUrl = rtrim((string)($this->configuration['publicBaseUrl'] ?? ''), '/');
         $this->basePath = trim((string)($this->configuration['basePath'] ?? ''), '/');
+        $this->usePathStyleEndpoint = (bool)($this->configuration['usePathStyleEndpoint'] ?? true);
+        $this->compatibilityMode = (bool)($this->configuration['compatibilityMode'] ?? true);
     }
 
     /**
@@ -64,7 +74,34 @@ class R2Driver extends AbstractHierarchicalFilesystemDriver
      */
     public function initialize(): void
     {
-        // TODO stage 3: create the S3 client against the R2 endpoint
+        // A storage may be only partially configured while an editor is still
+        // filling in the form. Bailing out quietly keeps the file module usable
+        // instead of breaking it for every storage.
+        if ($this->endpoint === '' || $this->accessKeyId === '' || $this->secretAccessKey === '') {
+            return;
+        }
+
+        $options = [
+            'version' => 'latest',
+            // Providers without regions (R2, MinIO) still need a value here,
+            // because the SDK uses it when calculating the request signature.
+            'region' => $this->region !== '' ? $this->region : 'auto',
+            'endpoint' => $this->endpoint,
+            'use_path_style_endpoint' => $this->usePathStyleEndpoint,
+            'credentials' => [
+                'key' => $this->accessKeyId,
+                'secret' => $this->secretAccessKey,
+            ],
+        ];
+
+        if ($this->compatibilityMode) {
+            // Most non-AWS providers do not implement the integrity checksums
+            // the SDK sends by default and answer with 501 Not Implemented.
+            $options['request_checksum_calculation'] = 'when_required';
+            $options['response_checksum_validation'] = 'when_required';
+        }
+
+        $this->client = new S3Client($options);
     }
 
     public function mergeConfigurationCapabilities(Capabilities $capabilities): Capabilities
@@ -283,7 +320,7 @@ class R2Driver extends AbstractHierarchicalFilesystemDriver
     private function notImplemented(string $method): \RuntimeException
     {
         return new \RuntimeException(
-            sprintf('R2Driver::%s() is not implemented yet.', $method),
+            sprintf('S3Driver::%s() is not implemented yet.', $method),
             1789414273
         );
     }

@@ -16,9 +16,9 @@ declare(strict_types=1);
 
 defined('TYPO3') or die();
 
-$GLOBALS['TYPO3_CONF_VARS']['SYS']['fal']['registeredDrivers']['R2'] = [
-    'class' => \Marcmaerdian\FalR2Driver\Driver\R2Driver::class,
-    'shortName' => 'R2',
-    'label' => 'Cloudflare R2',
-    'flexFormDS' => 'FILE:EXT:fal_r2_driver/Configuration/FlexForm/R2DriverFlexForm.xml',
+$GLOBALS['TYPO3_CONF_VARS']['SYS']['fal']['registeredDrivers']['S3'] = [
+    'class' => \Marcmaerdian\FalS3Driver\Driver\S3Driver::class,
+    'shortName' => 'S3',
+    'label' => 'S3-compatible storage (R2, Hetzner, MinIO, AWS, R2 Cloudflare)',
+    'flexFormDS' => 'FILE:EXT:fal_s3_driver/Configuration/FlexForm/S3DriverFlexForm.xml',
 ];

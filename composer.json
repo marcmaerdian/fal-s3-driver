@@ -1,9 +1,9 @@
 {
-  "name": "marcmaerdian/fal-r2-driver",
-  "description": "TYPO3 FAL driver for Cloudflare R2 object storage",
+  "name": "marcmaerdian/fal-s3-driver",
+  "description": "TYPO3 FAL driver for S3-compatible object storage (Cloudflare R2, Hetzner, MinIO, AWS S3)",
   "license": "GPL-2.0-or-later",
   "type": "typo3-cms-extension",
-  "keywords": ["typo3", "fal", "driver", "cloudflare", "r2", "s3", "cdn"],
+  "keywords": ["typo3", "fal", "driver", "s3", "cloudflare", "r2", "hetzner", "minio", "cdn"],
   "authors": [
     {
       "name": "Marc Märdian",
@@ -12,6 +12,15 @@
       "role": "Developer"
     }
   ],
+  "config": {
+    "platform": {
+      "php": "8.2.0"
+    },
+    "allow-plugins": {
+      "typo3/cms-composer-installers": true,
+      "typo3/class-alias-loader": true
+    }
+  },
   "require": {
     "php": "^8.2",
     "aws/aws-sdk-php": "^3.300",
@@ -19,12 +28,12 @@
   },
   "autoload": {
     "psr-4": {
-      "Marcmaerdian\\FalR2Driver\\": "Classes/"
+      "Marcmaerdian\\FalS3Driver\\": "Classes/"
     }
   },
   "extra": {
     "typo3/cms": {
-      "extension-key": "fal_r2_driver"
+      "extension-key": "fal_s3_driver"
     }
   }
 }
